@@ -4,6 +4,34 @@
 
 ---
 
+## 환경 설정
+
+### 1. Conda 설치 (Miniforge)
+
+```bash
+brew install miniforge
+conda init zsh
+```
+
+설치 후 터미널을 재시작합니다.
+
+### 2. 가상환경 생성 및 활성화
+
+```bash
+conda create -n hanwoo python=3.11 jupyter pandas matplotlib seaborn -y
+conda activate hanwoo
+```
+
+### 3. Jupyter 노트북 실행
+
+```bash
+jupyter notebook hanwoo_eda.ipynb
+```
+
+또는 VS Code에서 `hanwoo_eda.ipynb`를 열고 우측 상단 커널 선택에서 `hanwoo`를 선택합니다.
+
+---
+
 ## 데이터 개요
 
 | 파일명 | 설명 | 행 수 |
