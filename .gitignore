@@ -1,0 +1,7 @@
+#Data
+data/
+소도체 등급판정기준 설명자료.pdf
+
+#Claude/OMC
+.omc/
+.claude/
