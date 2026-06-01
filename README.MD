@@ -8,12 +8,33 @@
 
 ### 1. Conda 설치 (Miniforge)
 
+**macOS (Homebrew)**
+
 ```bash
 brew install miniforge
 conda init zsh
 ```
 
-설치 후 터미널을 재시작합니다.
+**Windows**
+
+PowerShell에서 winget으로 설치합니다 (Windows 10 1709 이상 기본 내장):
+
+```powershell
+winget install CondaForge.Miniforge3
+```
+
+설치 완료 후 전체 경로로 conda를 초기화합니다 (설치 직후에는 `conda` 명령어가 PATH에 없음):
+
+```powershell
+& "$env:USERPROFILE\miniforge3\Scripts\conda.exe" init powershell
+```
+
+> PowerShell 실행 정책 오류가 뜨면 먼저 실행합니다:
+> ```powershell
+> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+> ```
+
+초기화 후 PowerShell을 **완전히 닫고 새로 열면** `conda` 명령어를 바로 사용할 수 있습니다.
 
 ### 2. 가상환경 생성 및 활성화
 
