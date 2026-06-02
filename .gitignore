@@ -5,3 +5,9 @@ data/
 #Claude/OMC
 .omc/
 .claude/
+
+#Models
+models/
+
+#MD Files
+CLAUDE.md
