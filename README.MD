@@ -84,16 +84,16 @@ jupyter notebook hanwoo_eda.ipynb
 
 ### 6. 파이프라인 실행
 
-`pipeline.py` 상단의 경로를 로컬 환경에 맞게 수정한 뒤 실행합니다.
+`pipelines/pipeline.py` 상단의 경로를 로컬 환경에 맞게 수정한 뒤 실행합니다.
 
 ```python
-# pipeline.py 상단
+# pipelines/pipeline.py 상단
 DATA_DIR = "data"   # CSV 파일이 있는 디렉토리
 OUT_DIR  = "submissions"  # 결과 파일 저장 디렉토리
 ```
 
 ```bash
-python pipeline.py
+python pipelines/pipeline.py
 ```
 
 실행 완료 시 `submissions/` 폴더에 제출 파일이 생성됩니다.
