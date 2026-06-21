@@ -32,6 +32,7 @@ TARGET_STAT_GROUPS = [("KPN_NO", "kpn"), ("stn", "stn")]
 COUNT_GROUPS = [("KPN_NO", "kpn"), ("stn", "stn"), ("sido", "sido"), ("sigungu", "sigungu")]
 CATBOOST_TASK_TYPE = os.getenv("CATBOOST_TASK_TYPE", "CPU")
 SAVE_OOF = os.getenv("SAVE_OOF", "1") == "1"
+SMOKE_FIRST_FOLD = os.getenv("V10_SMOKE_FIRST_FOLD", "0") == "1"
 
 
 def elapsed(start):
@@ -45,12 +46,14 @@ def normalized_keys(series):
 def attach_fold_statistics(train_fold, val_fold, test_fold=None):
     """Add counts and smoothed component priors using only the current training fold.
 
-    Training rows receive leave-one-out statistics. Validation and test rows never
-    use their own targets. This makes the features valid for unseen-farm CV.
+    Training rows receive leave-one-farm-out statistics. Validation and test rows
+    never use their own targets. This matches unseen-farm CV without allowing a
+    training row to recover its farm's target distribution through KPN/station.
     """
     outputs = [train_fold.copy(), val_fold.copy()]
     if test_fold is not None:
         outputs.append(test_fold.copy())
+    train_farms = normalized_keys(train_fold["FARM_UNIQUE_NO"])
 
     for group_col, prefix in COUNT_GROUPS:
         if group_col not in train_fold.columns:
@@ -88,18 +91,34 @@ def attach_fold_statistics(train_fold, val_fold, test_fold=None):
             for cls in y_classes
         }
 
+        own_frame = pd.DataFrame(
+            {"key": train_keys, "farm": train_farms}, index=train_fold.index
+        )
+        own_frame["q_count"] = np.float32(1.0)
+        own_frame["y_count"] = train_fold["_graded"].to_numpy(dtype="float32")
+        for cls in q_classes:
+            own_frame[f"q{cls}"] = (train_fold["_q_idx"].to_numpy() == cls).astype("float32")
+        for cls in y_classes:
+            own_frame[f"y{cls}"] = (
+                train_fold["_graded"].to_numpy()
+                & (train_fold["_y_idx"].to_numpy() == cls)
+            ).astype("float32")
+        own_columns = [column for column in own_frame.columns if column not in {"key", "farm"}]
+        own_stats = own_frame.groupby(["key", "farm"], sort=False)[own_columns].transform("sum")
+        del own_frame
+
         for output_index, output in enumerate(outputs):
             keys = normalized_keys(output[group_col])
             qc = keys.map(q_count).fillna(0).to_numpy(dtype="float32")
             yc = keys.map(y_count).fillna(0).to_numpy(dtype="float32")
             if output_index == 0:
-                qc = np.maximum(qc - 1.0, 0.0)
-                yc = np.maximum(yc - output["_graded"].to_numpy(dtype="float32"), 0.0)
+                qc = np.maximum(qc - own_stats["q_count"].to_numpy(dtype="float32"), 0.0)
+                yc = np.maximum(yc - own_stats["y_count"].to_numpy(dtype="float32"), 0.0)
 
             for cls in q_classes:
                 numerator = keys.map(q_sums[cls]).fillna(0).to_numpy(dtype="float32")
                 if output_index == 0:
-                    numerator -= (output["_q_idx"].to_numpy() == cls)
+                    numerator -= own_stats[f"q{cls}"].to_numpy(dtype="float32")
                 output[f"{prefix}_q{cls}_prior"] = (
                     (numerator + TARGET_SMOOTHING * q_prior[cls])
                     / (qc + TARGET_SMOOTHING)
@@ -108,14 +127,13 @@ def attach_fold_statistics(train_fold, val_fold, test_fold=None):
             for cls in y_classes:
                 numerator = keys.map(y_sums[cls]).fillna(0).to_numpy(dtype="float32")
                 if output_index == 0:
-                    numerator -= (
-                        output["_graded"].to_numpy()
-                        & (output["_y_idx"].to_numpy() == cls)
-                    )
+                    numerator -= own_stats[f"y{cls}"].to_numpy(dtype="float32")
                 output[f"{prefix}_y{cls}_prior"] = (
                     (numerator + TARGET_SMOOTHING * y_prior[cls])
                     / (yc + TARGET_SMOOTHING)
                 ).astype("float32")
+
+        del own_stats
 
     return outputs[0], outputs[1], outputs[2] if test_fold is not None else None
 
@@ -249,6 +267,11 @@ def save_class_metrics(y_true, probabilities, encoder, path):
 
 
 print(f"\n[{VERSION}] Starting fold-safe direct + hierarchical pipeline...")
+if CATBOOST_TASK_TYPE.upper() == "CPU":
+    print(
+        f"[{VERSION}] WARNING: CatBoost CPU mode is very slow for 2.4M rows. "
+        "If an NVIDIA GPU is available, set CATBOOST_TASK_TYPE=GPU before running."
+    )
 started = time.time()
 processor = HanwooDataProcessorV8(DATA_DIR)
 processor.load_auxiliary_data()
@@ -284,6 +307,10 @@ features = [
     and (column in test_base.columns or column.endswith(("_count", "_prior")))
     and (is_numeric_dtype(prototype[column]) or isinstance(prototype[column].dtype, pd.CategoricalDtype))
 ]
+direct_features = [
+    column for column in features
+    if not column.endswith("_prior") and not column.endswith("_group_log_count")
+]
 categorical_features = [column for column in processor.CATEGORICAL_COLUMNS if column in features]
 category_levels = {
     column: sorted(set(train[column].astype("string").fillna("__MISSING__").unique()) | {"__MISSING__", "__UNKNOWN__"})
@@ -291,7 +318,10 @@ category_levels = {
 }
 del prototype
 gc.collect()
-print(f"[{VERSION}] Features: {len(features)} ({len(categorical_features)} categorical)")
+print(
+    f"[{VERSION}] Features: direct={len(direct_features)}, "
+    f"hierarchical={len(features)} ({len(categorical_features)} categorical)"
+)
 
 lgb_params = dict(
     objective="multiclass", metric="None", learning_rate=0.03, num_leaves=127,
@@ -311,7 +341,7 @@ hierarchical_oof = np.zeros_like(direct_oof)
 direct_test = np.zeros((len(test_base), n_classes), dtype="float32")
 hierarchical_test = np.zeros_like(direct_test)
 fold_ids = np.full(len(train), -1, dtype="int8")
-importance = np.zeros(len(features), dtype="float64")
+importance = np.zeros(len(direct_features), dtype="float64")
 fold_rows = []
 
 splitter = StratifiedGroupKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
@@ -325,15 +355,22 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
 
     direct_model = lgb.LGBMClassifier(**lgb_params, num_class=n_classes)
     direct_model.fit(
-        x_tr, y_final[tr_idx], eval_set=[(x_val, y_final[val_idx])], eval_metric=lgb_macro_f1,
+        x_tr[direct_features], y_final[tr_idx],
+        eval_set=[(x_val[direct_features], y_final[val_idx])], eval_metric=lgb_macro_f1,
         callbacks=[lgb.early_stopping(200), lgb.log_evaluation(100)],
     )
-    direct_val = direct_model.predict_proba(x_val).astype("float32")
+    direct_val = direct_model.predict_proba(x_val[direct_features]).astype("float32")
     direct_oof[val_idx] = direct_val
-    direct_test += direct_model.predict_proba(x_test).astype("float32") / N_SPLITS
+    direct_test += direct_model.predict_proba(x_test[direct_features]).astype("float32") / N_SPLITS
     importance += direct_model.feature_importances_ / N_SPLITS
+    direct_fold_f1 = f1_score(y_final[val_idx], direct_val.argmax(1), average="macro")
+    print(f"  Direct fold Macro F1: {direct_fold_f1:.4f}")
     del direct_model
     gc.collect()
+
+    if SMOKE_FIRST_FOLD:
+        print(f"[{VERSION}] First-fold smoke test complete; exiting before CatBoost.")
+        raise SystemExit(0)
 
     x_tr_cat = prepare_catboost_features(x_tr, categorical_features)
     x_val_cat = prepare_catboost_features(x_val, categorical_features)
@@ -365,7 +402,7 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     hierarchical_test += combine_hierarchical_probabilities(quality_test, yield_test, q_encoder, y_encoder, final_encoder) / N_SPLITS
     fold_rows.append({
         "fold": fold + 1,
-        "direct_f1": f1_score(y_final[val_idx], direct_val.argmax(1), average="macro"),
+        "direct_f1": direct_fold_f1,
         "hierarchical_f1": f1_score(y_final[val_idx], hierarchical_val.argmax(1), average="macro"),
     })
     print(f"  Direct={fold_rows[-1]['direct_f1']:.4f}, hierarchical={fold_rows[-1]['hierarchical_f1']:.4f}")
@@ -412,7 +449,7 @@ pd.DataFrame(fold_rows).to_csv(f"{OUT_DIR}/fold_metrics.csv", index=False)
 pd.DataFrame(calibration_rows).to_csv(f"{OUT_DIR}/calibration_folds.csv", index=False)
 pd.DataFrame(scale_rows).to_csv(f"{OUT_DIR}/class_scales.csv", index=False)
 save_class_metrics(y_final, calibrated_oof, final_encoder, f"{OUT_DIR}/oof_class_metrics.csv")
-pd.DataFrame({"feature": features, "importance": importance}).sort_values("importance", ascending=False).to_csv(
+pd.DataFrame({"feature": direct_features, "importance": importance}).sort_values("importance", ascending=False).to_csv(
     f"{OUT_DIR}/feature_importance.csv", index=False
 )
 if SAVE_OOF:

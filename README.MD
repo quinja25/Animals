@@ -71,7 +71,7 @@ fm._load_fontmanager(try_read_cache=False)
 ### 4. 추가 패키지 설치
 
 ```bash
-pip install "numpy<2" lightgbm catboost scikit-learn
+pip install "numpy<2" lightgbm catboost xgboost scikit-learn
 ```
 
 > 현재 Conda용 CatBoost 1.2.5는 NumPy 2.x와 바이너리 ABI가 맞지 않을 수 있습니다. `numpy.dtype size changed` 오류가 발생하면 `conda install -n hanwoo -c conda-forge "numpy=1.26.4" -y`로 NumPy 버전을 맞춥니다.
@@ -86,20 +86,36 @@ jupyter notebook hanwoo_eda.ipynb
 
 ### 6. 파이프라인 실행
 
-현재 최신 파이프라인은 `pipelines/pipeline_v10.py`입니다. 프로젝트 루트에서 실행합니다.
+현재 최신 실험 파이프라인은 `pipelines/pipeline_v11.py`입니다. 프로젝트 루트에서 실행합니다.
 
 ```powershell
-python pipelines/pipeline_v10.py
+python pipelines/pipeline_v11.py
 ```
 
 CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 있습니다.
 
 ```powershell
 $env:CATBOOST_TASK_TYPE="GPU"
-python pipelines/pipeline_v10.py
+$env:XGBOOST_DEVICE="cuda"
+python pipelines/pipeline_v11.py
 ```
 
-실행 완료 시 `submissions/v10/`에 제출 파일과 검증 산출물이 생성됩니다.
+전체 학습 전에 첫 번째 LightGBM Fold만 검증하려면 다음 smoke test를 실행합니다.
+
+```powershell
+$env:V11_SMOKE_STAGE="lgb"
+python pipelines/pipeline_v11.py
+```
+
+첫 Fold의 LightGBM, CatBoost, XGBoost 구성요소를 모두 검증하려면 다음을 실행합니다.
+
+```powershell
+$env:V11_SMOKE_STAGE="components"
+python pipelines/pipeline_v11.py
+$env:V11_SMOKE_STAGE=""
+```
+
+실행 완료 시 `submissions/v11/`에 제출 파일과 검증 산출물이 생성됩니다.
 
 | 파일 | 설명 |
 |------|------|
@@ -111,7 +127,7 @@ python pipelines/pipeline_v10.py
 | `oof_predictions.npz` | 직접·계층·보정 OOF 확률과 Fold 번호 |
 | `feature_importance.csv` | LightGBM 피처 중요도 |
 
-> v10은 240만 건 전체 데이터에 대해 5-Fold로 LightGBM 1개와 CatBoost 2개를 학습하므로 실행 시간이 길고 메모리 사용량이 큽니다.
+> v10은 240만 건 전체 데이터에 대해 5-Fold로 LightGBM 1개와 CatBoost 2개를 학습하므로 실행 시간이 길고 메모리 사용량이 큽니다. NVIDIA GPU가 있는 환경에서는 반드시 `CATBOOST_TASK_TYPE=GPU` 사용을 권장합니다.
 
 ---
 
@@ -124,6 +140,7 @@ python pipelines/pipeline_v10.py
 | v8 | LightGBM + CatBoost 직접 16클래스 앙상블 | StratifiedGroupKFold | OOF 0.2126 |
 | v9 | 직접 LightGBM + 계층형 CatBoost + 클래스 보정 | StratifiedGroupKFold | **LB 0.239**, 보정 OOF 0.2430 |
 | v10 | Fold-safe KPN·관측소 사전확률 + 교차 적합 보정 | StratifiedGroupKFold | 학습 및 평가 예정 |
+| v11 | LightGBM 직접 + CatBoost 육질 + XGBoost 순서형 육량 | StratifiedGroupKFold + Cross-fit | 구성요소 검증 예정 |
 
 v9의 성능 향상은 단순한 모델 용량 증가보다 다음 세 요소에서 발생했습니다.
 
