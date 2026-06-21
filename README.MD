@@ -71,8 +71,10 @@ fm._load_fontmanager(try_read_cache=False)
 ### 4. 추가 패키지 설치
 
 ```bash
-pip install lightgbm scikit-learn
+pip install "numpy<2" lightgbm catboost scikit-learn
 ```
+
+> 현재 Conda용 CatBoost 1.2.5는 NumPy 2.x와 바이너리 ABI가 맞지 않을 수 있습니다. `numpy.dtype size changed` 오류가 발생하면 `conda install -n hanwoo -c conda-forge "numpy=1.26.4" -y`로 NumPy 버전을 맞춥니다.
 
 ### 5. Jupyter 노트북 실행
 
@@ -84,19 +86,52 @@ jupyter notebook hanwoo_eda.ipynb
 
 ### 6. 파이프라인 실행
 
-`pipelines/pipeline.py` 상단의 경로를 로컬 환경에 맞게 수정한 뒤 실행합니다.
+현재 최신 파이프라인은 `pipelines/pipeline_v10.py`입니다. 프로젝트 루트에서 실행합니다.
 
-```python
-# pipelines/pipeline.py 상단
-DATA_DIR = "data"   # CSV 파일이 있는 디렉토리
-OUT_DIR  = "submissions"  # 결과 파일 저장 디렉토리
+```powershell
+python pipelines/pipeline_v10.py
 ```
 
-```bash
-python pipelines/pipeline.py
+CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 있습니다.
+
+```powershell
+$env:CATBOOST_TASK_TYPE="GPU"
+python pipelines/pipeline_v10.py
 ```
 
-실행 완료 시 `submissions/` 폴더에 제출 파일이 생성됩니다.
+실행 완료 시 `submissions/v10/`에 제출 파일과 검증 산출물이 생성됩니다.
+
+| 파일 | 설명 |
+|------|------|
+| `260418.csv` | 최종 제출 파일 |
+| `fold_metrics.csv` | Fold별 직접·계층 모델 Macro F1 |
+| `calibration_folds.csv` | 교차 적합 보정 성능과 블렌드 설정 |
+| `class_scales.csv` | Fold별 클래스 확률 보정 계수 |
+| `oof_class_metrics.csv` | 클래스별 OOF 정밀도·재현율·F1 |
+| `oof_predictions.npz` | 직접·계층·보정 OOF 확률과 Fold 번호 |
+| `feature_importance.csv` | LightGBM 피처 중요도 |
+
+> v10은 240만 건 전체 데이터에 대해 5-Fold로 LightGBM 1개와 CatBoost 2개를 학습하므로 실행 시간이 길고 메모리 사용량이 큽니다.
+
+---
+
+## 모델 개발 현황
+
+| 버전 | 핵심 모델 | 검증 전략 | 성능 |
+|:---:|------|------|------|
+| v6 | 계층형 LightGBM, 누적 기상 피처 | Farm GroupKFold | LB 0.212 |
+| v7 | CatBoost 단일 모델, 데이터 정합성 개선 | StratifiedGroupKFold | 별도 기록 없음 |
+| v8 | LightGBM + CatBoost 직접 16클래스 앙상블 | StratifiedGroupKFold | OOF 0.2126 |
+| v9 | 직접 LightGBM + 계층형 CatBoost + 클래스 보정 | StratifiedGroupKFold | **LB 0.239**, 보정 OOF 0.2430 |
+| v10 | Fold-safe KPN·관측소 사전확률 + 교차 적합 보정 | StratifiedGroupKFold | 학습 및 평가 예정 |
+
+v9의 성능 향상은 단순한 모델 용량 증가보다 다음 세 요소에서 발생했습니다.
+
+- 최종 16개 등급을 직접 예측하는 모델과 육질·육량을 분리하는 계층 모델의 오류 다양성
+- 불균형 클래스에 대한 클래스별 확률 스케일 보정
+- 테스트 농장과 훈련 농장의 중복이 0%인 조건을 반영한 농장 그룹 교차검증
+
+v10은 이 구조를 유지하면서 KPN 및 기상 관측소의 과거 육질·육량 분포를 Fold 내부에서만 계산하고, 후처리 역시 교차 적합하여 v9의 낙관적인 OOF 평가를 줄이는 것을 목표로 합니다. 상세 내용은 [PIPELINE.MD](PIPELINE.MD)를 참고하세요.
 
 ---
 
