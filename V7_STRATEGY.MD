@@ -1,136 +1,144 @@
-# Hanwoo Grade Prediction v7 Analysis Report
+# 한우 등급 예측 v7 분석 보고서
 
-## Executive Summary
+## 요약
 
-v6 is currently capped at `0.212` Macro F1 on the leaderboard. The main constraint is not just model capacity, but a set of structural data issues:
+v6의 리더보드 Macro F1은 `0.212`였습니다. 당시 핵심 제약은 단순한 모델 용량보다 데이터 구조와 검증 정합성에 있었습니다.
 
-- `0%` farm overlap between train and test makes farm-specific memorization useless at inference time.
-- KPN SBV features are extremely sparse because the Excel file covers mostly older bulls, so the current genetic signal is weak.
-- Several engineered features have leakage or time-alignment risk, especially target statistics, weather rollups, and farm-level aggregates.
-- The current hierarchical grade approach can produce logically inconsistent combinations because quality and yield are modeled independently.
+- 훈련셋과 테스트셋의 농장 중복률이 `0%`이므로 농장별 성과를 암기하는 모델은 테스트에서 일반화되지 않습니다.
+- KPN 육종가 피처는 주로 과거 종축만 포함하여 결측률이 높고 실제 유전 신호의 적용 범위가 좁았습니다.
+- 타겟 통계, 기상 집계, 농장 단위 집계에는 누수 또는 시간 정렬 위험이 있었습니다.
+- 육질과 육량을 독립적으로 예측하는 계층 모델은 두 출력의 상관관계를 충분히 반영하지 못했습니다.
 
-The practical path to v7 is to reduce leakage, improve feature honesty, and shift the model toward features that survive the test distribution: genetics that actually join, station-level signal, animal physiology, and properly aligned weather history.
+따라서 v7의 실질적인 개선 방향은 피처를 무작정 늘리는 것이 아니라, 테스트 분포에서도 사용할 수 있는 유전·관측소·개체 생리·시간 정렬 기상 피처를 중심으로 데이터 누수를 줄이는 것이었습니다.
 
-## Current Findings
+## 당시 분석 결과
 
-### 1. Validation and leaderboard
+### 1. 검증 및 리더보드
 
-- v6 LB score: `0.212` Macro F1.
-- Train size: `2.4M` rows.
-- Test size: `452K` rows.
-- Farm overlap: `0%`.
+- v6 리더보드 점수: Macro F1 `0.212`
+- 훈련 데이터: 약 240만 건
+- 테스트 데이터: 약 45만 건
+- 훈련·테스트 농장 중복률: `0%`
 
-### 2. Grade distribution
+### 2. 등급 분포
 
-- `LAST_GRADE` includes the `등외` class.
-- The `등외` value appears as corrupted bytes in raw form and must be decoded as UTF-8.
-- `등외` is rare: `5,540` rows, about `0.23%` of train.
+- `LAST_GRADE`에는 `등외` 클래스가 포함됩니다.
+- 원본 데이터의 `등외` 값 일부는 바이트 문자열 형태이므로 UTF-8 디코딩이 필요합니다.
+- `등외`는 훈련 데이터 5,540건, 약 `0.23%`로 매우 희소합니다.
 
-### 3. Lineage and KPN coverage
+### 3. 혈통 및 KPN 적용 범위
 
-- Only about `62%` of cattle in train/test have lineage records.
-- About `40%` of cattle miss `KPN_NO` after the lineage join.
-- Of the rows that do have KPN info, only `7.73%` match the Excel breeding values.
-- The Excel file has `995` unique KPNs, while `1,366` appear in lineage.
-- Match quality drops sharply for cattle born in `2017` and later.
-- KPN grade averages and counts are missing for about `40-41%` of rows because of join failure.
-- Historical KPN grade stats from training are still useful because about `98%` of test KPNs appear somewhere in train.
+- 훈련·테스트 개체 중 약 `62%`가 혈통 레코드와 연결됩니다.
+- 혈통 조인 후 약 `40%`의 행에서 `KPN_NO`가 결측입니다.
+- KPN 정보가 있는 행 중 Excel 육종가 자료와 연결되는 비율도 낮았습니다.
+- Excel 파일에는 995개의 고유 KPN이 있고 혈통 데이터에는 1,366개가 존재했습니다.
+- 최근 출생 개체일수록 Excel 육종가 자료의 연결률이 크게 감소했습니다.
+- 훈련 기반 KPN 이력 통계는 테스트 KPN의 상당 부분이 훈련에 존재하므로 여전히 활용 가치가 있습니다.
 
-### 4. Station statistics
+### 4. 관측소 통계
 
-- Station grade averages are missing for about `7.4%` of test because some stations never appear in train.
-- Station remains useful, but it should be treated as a generalization feature, not a farm proxy.
+- 일부 테스트 관측소는 훈련에 존재하지 않아 관측소 기반 통계가 결측될 수 있습니다.
+- 관측소는 농장 ID의 대체 변수가 아니라 지역 환경의 일반화 피처로 사용해야 합니다.
 
-### 5. Feature importance
+### 5. 피처 중요도
 
-- The strongest features are `density`, `weight`, `weight per age`, `age`, `station`, and `station grade average`.
-- KPN SBV features sit near the bottom because they are sparse and incomplete.
+당시 주요 피처는 다음과 같았습니다.
 
-## Key Problems
+- 사육 밀도
+- 도체중량
+- 월령 대비 체중
+- 월령
+- 기상 관측소
+- 관측소별 등급 통계
 
-### 1. KPN SBV features are too sparse
+KPN 육종가 피처는 결측과 낮은 연결률 때문에 중요도가 낮았습니다.
 
-The current Excel-based KPN features are nearly unusable as direct predictors because roughly `95.5%` of the relevant values are missing. The file only covers older bulls, so it does not provide broad coverage for the current population.
+## 핵심 문제
 
-### 2. Hierarchical grade modeling is inconsistent
+### 1. 희소한 KPN 육종가 피처
 
-The model predicts quality and yield independently, but those outputs are correlated. That allows invalid combinations such as `1++A` when the quality path should already imply `등외`.
+Excel 기반 KPN 피처는 결측률이 매우 높아 전체 개체에 적용하기 어렵습니다. 제한된 과거 종축 자료를 현재 개체 전체를 대표하는 강한 피처로 간주해서는 안 됩니다.
 
-There is also a concern that missing yield components default to `B` during extraction, which may bias the model toward that class.
+### 2. 계층형 등급 모델의 독립성 가정
 
-### 3. Weather features may leak future information
+육질과 육량을 독립적으로 예측하면 두 출력 사이의 상관관계를 놓칠 수 있습니다. 또한 `등외`처럼 육량등급이 없는 클래스의 처리 방식이 B등급 편향을 만들 가능성도 있었습니다.
 
-The rolling weather features are built on monthly aggregates, but they are not tightly aligned to each animal’s slaughter date. That risks mixing future weather into historical windows.
+### 3. 기상 피처의 미래 정보 위험
 
-### 4. Farm area and density logic is stale
+월별 Rolling 기상 피처는 각 개체의 도축일 이전 정보만 포함하도록 정렬해야 합니다. 정렬 기준이 불명확하면 도축 이후의 기상이 과거 구간에 포함될 수 있습니다.
 
-- Farm area is deduplicated by keeping the first record rather than the most recent one.
-- Density uses a static 2023 cattle count across all years.
+### 4. 농장 면적과 밀도의 시간 정합성
 
-Both choices reduce temporal fidelity and can distort farm condition estimates.
+- 농장 면적 중복 레코드의 선택 기준이 명확해야 합니다.
+- 연도별 사육두수를 사용하지 않고 고정된 연도의 값만 사용하면 실제 농장 상태가 왜곡됩니다.
 
-### 5. Station-level averages can leak across folds
+### 5. 관측소 타겟 통계 누수
 
-Station grade averages are computed from the full training set. Since farms in the same station can land in different folds, this can leak target information into validation.
+전체 훈련 데이터로 관측소별 평균 등급을 계산하면 검증 Fold의 타겟이 피처 생성에 포함됩니다. 모든 타겟 통계는 Fold 내부의 훈련 부분만 사용해야 합니다.
 
-### 6. Validation environment is currently blocked
+## v7 개선 방향
 
-The validation script exists, but the current Python environment cannot run it because `pandas` is not installed.
+### 우선순위 1: Fold-safe 타겟 통계
 
-## v7 Direction
+KPN 및 관측소별 등급 통계를 각 교차검증 Fold 안에서 다시 계산합니다. 표본이 적은 그룹은 전역 평균으로 수축하는 Bayesian smoothing을 적용합니다.
 
-### Priority 1: Make target statistics fold-safe
+### 우선순위 2: 유효한 유전 정보만 사용
 
-Rebuild `kpn_grade_avg`, `kpn_grade_cnt`, and station-level grade features inside each CV fold only. Use Bayesian smoothing so sparse groups shrink toward the fold mean instead of producing unstable estimates.
+KPN 피처는 실제 연결 범위와 결측률을 측정한 뒤 사용합니다. Excel 자료가 전체 KPN을 포함한다고 가정하지 않습니다.
 
-### Priority 2: Use only meaningful genetic coverage
+### 우선순위 3: 최종 등급 구조 개선
 
-Keep the KPN features only where the join is reliable. Expand beyond the four current SBV columns if the source supports it, but do not assume the Excel file will cover the full KPN universe.
+직접 16클래스 모델을 사용하거나, 직접 모델과 제약된 계층 모델을 함께 사용하여 육질·육량의 독립성 가정을 보완합니다.
 
-### Priority 3: Fix the grade formulation
+### 우선순위 4: 개체 시간축 기반 기상 피처
 
-Move away from the current independent quality/yield extraction if it can produce invalid combinations. At minimum, enforce output consistency in post-processing. A direct 16-class formulation is a cleaner long-term option.
+기상 집계는 각 개체의 출생일부터 도축일까지의 생애주기와 도축 직전 구간을 기준으로 생성합니다. 모든 구간은 도축일 이전 데이터만 포함해야 합니다.
 
-### Priority 4: Rebuild weather features around animal time
+### 우선순위 5: 농장 면적 및 밀도 수정
 
-Weather should be tied to birth-to-slaughter lifecycle windows, not just slaughter-month station averages. That makes the feature set more biologically meaningful and less likely to leak future information.
+해당 연도의 사육두수와 면적을 사용하여 밀도를 계산하고, 중복 레코드는 명확한 최신성 기준으로 정리합니다.
 
-### Priority 5: Correct farm area and density features
+### 우선순위 6: 안정적인 기본 피처 유지
 
-Use the latest available farm area record, and compute density with a time-appropriate livestock count rather than a fixed 2023 constant.
+다음 피처는 후속 버전에서도 유지할 가치가 있었습니다.
 
-### Priority 6: Preserve stable predictors
+- `WEIGHT`
+- `AGE`
+- `weight_per_age`
+- `stn`
+- Fold-safe 관측소 통계
+- 도축일 이전의 기상 요약값
 
-Keep the features that are clearly working:
+## 권장 구현 순서
 
-- `weight`
-- `age`
-- `weight per age`
-- `station`
-- `station grade average`
-- valid station/weather summaries
+1. KPN 및 관측소 타겟 통계를 Fold 내부 계산으로 변경
+2. 기상 데이터의 시간 정렬과 Rolling 구간 수정
+3. 농장 면적 중복과 연도별 밀도 계산 수정
+4. KPN 연결 범위와 결측률 재평가
+5. 직접 16클래스 모델과 제약된 계층 모델 비교
+6. 농장 기준 StratifiedGroupKFold로 재검증
 
-## Recommended v7 Build Order
+## 후속 버전 반영 결과
 
-1. Recompute KPN and station target stats with fold awareness.
-2. Fix weather time alignment and rebuild lifecycle weather features.
-3. Correct farm area deduplication and density calculation.
-4. Re-evaluate KPN features after join coverage is measured cleanly.
-5. Test a direct 16-class formulation or a constrained hierarchical version.
-6. Validate the revised pipeline on a working Python environment.
+v7에서 제기된 문제는 이후 버전에 다음과 같이 반영되었습니다.
 
-## Validation Note
+| 문제 | 반영 버전 | 처리 내용 |
+|------|:---------:|------|
+| 범주형 변수 처리 | v7~v9 | CatBoost 도입 |
+| 직접 16클래스 모델 | v8~v10 | LightGBM 직접 예측 경로 사용 |
+| 직접·계층 오류 다양성 | v9~v10 | 두 경로 확률 블렌드 |
+| 클래스 불균형 | v9~v10 | 클래스별 확률 스케일 보정 |
+| 타겟 통계 누수 | v10 | Leave-One-Out 및 Fold-safe KPN·관측소 사전확률 |
+| 후처리 OOF 과적합 | v10 | 보정기 교차 적합 |
 
-The prepared validator at `scratch/validate_v6.py` could not run in the current terminal because the environment is missing `pandas`.
+## 결론
 
-## Bottom Line
+v7 분석의 핵심은 새로운 피처의 개수보다 기존 피처의 정합성을 높이는 것이었습니다.
 
-The v7 gain will come less from adding more raw features and more from making the existing features honest:
+- Fold 간 타겟 누수 제거
+- 도축일 이후 기상 정보 배제
+- 연도에 맞는 농장 메타데이터 사용
+- 실제 연결 가능한 유전 피처만 활용
+- 직접 모델로 육질·육량의 상관관계 보완
 
-- no leakage in target statistics,
-- no stale farm metadata,
-- no future weather in historical windows,
-- no weak genetic features treated as if they were reliable,
-- no inconsistent grade outputs.
-
-That is the clearest path to improving beyond the current `0.212` Macro F1 ceiling.
+이 방향은 v9의 리더보드 Macro F1 `0.239` 개선으로 이어졌고, v10에서는 Fold-safe 사전확률과 교차 적합 후처리로 확장되었습니다.
