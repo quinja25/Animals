@@ -17,22 +17,41 @@ from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
 from data_processor_v8 import HanwooDataProcessorV8
+from data_processor_v12 import HanwooDataProcessorV12
+from proxy_features_v13 import PROXY_FEATURE_NAMES, TRAIT_COLUMNS, build_nested_proxy_features
 
 warnings.filterwarnings("ignore")
 np.random.seed(42)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-VERSION = "v11"
+VERSION = os.getenv("PIPELINE_VERSION", "v11")
 OUT_DIR = os.path.join(BASE_DIR, "submissions", VERSION)
 Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
 
 N_SPLITS = 5
 GROUP_SPECS = [("KPN_NO", "kpn"), ("stn", "stn"), ("sido", "sido"), ("sigungu", "sigungu")]
+CORE_GROUP_SPECS = list(GROUP_SPECS)
+EXTENDED_LINEAGE_SPECS = [
+    ("FATHER_CATTLE_NO", "father"),
+    ("MOTHER_ANIMAL_NO", "mother"),
+    ("F_GMOTHER_ANIMAL_NO", "f_gmother"),
+    ("F_GFATHER_CATTLE_NO", "f_gfather"),
+    ("M_GMOTHER_ANIMAL_NO", "m_gmother"),
+    ("M_GFATHER_CATTLE_NO", "m_gfather"),
+]
+ENABLE_EXTENDED_LINEAGE = os.getenv("ENABLE_EXTENDED_LINEAGE", "0") == "1"
+if ENABLE_EXTENDED_LINEAGE:
+    GROUP_SPECS += EXTENDED_LINEAGE_SPECS
+ENABLE_B_SPECIALIST = os.getenv("ENABLE_B_SPECIALIST", "0") == "1"
+ENABLE_YIELD_BALANCE = os.getenv("ENABLE_YIELD_BALANCE", "0") == "1"
+ENABLE_DUAL_C = os.getenv("ENABLE_DUAL_C", "0") == "1"
+ENABLE_PROXY_TRAITS = os.getenv("ENABLE_PROXY_TRAITS", "0") == "1"
+C_BALANCE_POWER = float(os.getenv("C_BALANCE_POWER", "0.5"))
 CATBOOST_TASK_TYPE = os.getenv("CATBOOST_TASK_TYPE", "GPU")
 XGBOOST_DEVICE = os.getenv("XGBOOST_DEVICE", "cuda")
 SAVE_OOF = os.getenv("SAVE_OOF", "1") == "1"
-SMOKE_STAGE = os.getenv("V11_SMOKE_STAGE", "").lower()  # "lgb" or "components"
+SMOKE_STAGE = os.getenv("PIPELINE_SMOKE_STAGE", os.getenv("V11_SMOKE_STAGE", "")).lower()
 
 
 def elapsed(start):
@@ -152,10 +171,12 @@ def lgb_macro_f1(y_true, probabilities):
     return "macro_f1", f1_score(y_true, np.argmax(probabilities, axis=1), average="macro"), True
 
 
-def build_xgb_classifier(positive_rate):
+def build_xgb_classifier(positive_rate, balance_power=0.5):
     # Mild square-root balancing makes the lower-frequency boundary visible
     # without destroying probability ranking as full inverse weighting can.
-    scale_pos_weight = float(np.sqrt((1.0 - positive_rate) / max(positive_rate, 1e-6)))
+    scale_pos_weight = float(
+        ((1.0 - positive_rate) / max(positive_rate, 1e-6)) ** balance_power
+    )
     return XGBClassifier(
         objective="binary:logistic",
         n_estimators=1800,
@@ -184,6 +205,23 @@ def combine_yield_hurdle(c_probability, a_given_non_c):
     p_a = p_non_c * np.clip(a_given_non_c, 1e-6, 1.0 - 1e-6)
     p_b = p_non_c - p_a
     result = np.column_stack([p_a, p_b, p_c]).astype("float32")
+    return result / np.maximum(result.sum(axis=1, keepdims=True), 1e-12)
+
+
+def adjust_yield_probabilities(probabilities, b_probability=None, b_weight=0.0, c_multiplier=1.0):
+    """Blend a B specialist and adjust C odds while preserving a valid simplex."""
+    result = np.asarray(probabilities, dtype="float32").copy()
+    if b_probability is not None and b_weight > 0:
+        specialist_b = np.clip(np.asarray(b_probability, dtype="float32"), 1e-6, 1.0 - 1e-6)
+        target_b = (1.0 - b_weight) * result[:, 1] + b_weight * specialist_b
+        ac_total = np.maximum(result[:, 0] + result[:, 2], 1e-12)
+        a_share = result[:, 0] / ac_total
+        remaining = 1.0 - target_b
+        result[:, 0] = remaining * a_share
+        result[:, 1] = target_b
+        result[:, 2] = remaining * (1.0 - a_share)
+    result[:, 2] *= c_multiplier
+    result = np.clip(result, 1e-8, None)
     return result / np.maximum(result.sum(axis=1, keepdims=True), 1e-12)
 
 
@@ -316,9 +354,16 @@ def save_class_metrics(y_true, probabilities, labels, path):
 
 
 print(f"\n[{VERSION}] Starting specialized three-model pipeline...")
-print(f"[{VERSION}] CatBoost={CATBOOST_TASK_TYPE}, XGBoost={XGBOOST_DEVICE}, smoke={SMOKE_STAGE or 'off'}")
+print(
+    f"[{VERSION}] CatBoost={CATBOOST_TASK_TYPE}, XGBoost={XGBOOST_DEVICE}, "
+        f"extended_lineage={ENABLE_EXTENDED_LINEAGE}, b_specialist={ENABLE_B_SPECIALIST}, "
+        f"yield_balance={ENABLE_YIELD_BALANCE}, dual_c={ENABLE_DUAL_C}, "
+        f"proxy_traits={ENABLE_PROXY_TRAITS}, c_power={C_BALANCE_POWER}, "
+    f"smoke={SMOKE_STAGE or 'off'}"
+)
 started = time.time()
-processor = HanwooDataProcessorV8(DATA_DIR)
+processor_class = HanwooDataProcessorV12 if ENABLE_EXTENDED_LINEAGE else HanwooDataProcessorV8
+processor = processor_class(DATA_DIR)
 processor.load_auxiliary_data()
 train_raw = pd.read_csv(f"{DATA_DIR}/hanwoo_train.csv")
 test_raw = pd.read_csv(f"{DATA_DIR}/test_hanwoo.csv")
@@ -352,7 +397,9 @@ base_features = [
     and column in test_base.columns
     and (is_numeric_dtype(train[column]) or isinstance(train[column].dtype, pd.CategoricalDtype))
 ]
-lgb_features = base_features + [f"{prefix}_group_count" for _, prefix in GROUP_SPECS]
+extended_lineage_columns = {column for column, _ in EXTENDED_LINEAGE_SPECS}
+lgb_features = [column for column in base_features if column not in extended_lineage_columns]
+lgb_features += [f"{prefix}_group_count" for _, prefix in CORE_GROUP_SPECS]
 
 cat_quality_features = list(dict.fromkeys(
     base_features
@@ -374,6 +421,13 @@ xgb_yield_features = [
     and is_numeric_dtype(prototype[column])
     and (column in xgb_explicit or column.startswith(xgb_numeric_prefixes) or column.endswith("_group_count"))
 ]
+if ENABLE_PROXY_TRAITS:
+    cat_quality_features += list(PROXY_FEATURE_NAMES)
+    xgb_yield_features += list(PROXY_FEATURE_NAMES)
+
+lgb_features = list(dict.fromkeys(lgb_features))
+cat_quality_features = list(dict.fromkeys(cat_quality_features))
+xgb_yield_features = list(dict.fromkeys(xgb_yield_features))
 
 category_levels = {
     column: sorted(set(train[column].astype("string").fillna("__MISSING__").unique()) | {"__MISSING__", "__UNKNOWN__"})
@@ -410,26 +464,77 @@ hierarchical_oof = np.zeros_like(direct_oof)
 quality_oof = np.zeros((n_rows, len(q_encoder.classes_)), dtype="float32")
 ordinal_quality_oof = np.zeros((n_rows, len(graded_quality_order)), dtype="float32")
 yield_oof = np.zeros((n_rows, len(y_encoder.classes_)), dtype="float32")
+yield_alt_oof = np.zeros_like(yield_oof)
+b_specialist_oof = np.zeros(n_rows, dtype="float32")
 direct_test = np.zeros((n_test, n_classes), dtype="float32")
 hierarchical_test = np.zeros_like(direct_test)
 quality_test_average = np.zeros((n_test, len(q_encoder.classes_)), dtype="float32")
 ordinal_quality_test = np.zeros((n_test, len(graded_quality_order)), dtype="float32")
 yield_test_average = np.zeros((n_test, len(y_encoder.classes_)), dtype="float32")
+yield_alt_test_average = np.zeros_like(yield_test_average)
+b_specialist_test_average = np.zeros(n_test, dtype="float32")
 fold_ids = np.full(n_rows, -1, dtype="int8")
 importance = np.zeros(len(lgb_features), dtype="float64")
 component_rows = []
+proxy_metric_rows = []
+component_count = 5 if ENABLE_B_SPECIALIST else 4
 
 splitter = StratifiedGroupKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
 for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=groups)):
     print(f"\n[Fold {fold + 1}/{N_SPLITS}] Building target-free feature views...")
     tr_aug, val_aug, test_aug = attach_fold_features(train.iloc[tr_idx], train.iloc[val_idx], test_base)
     all_features = list(dict.fromkeys(lgb_features + cat_quality_features + xgb_yield_features))
-    x_tr = prepare_features(tr_aug, all_features, categorical_features, category_levels)
-    x_val = prepare_features(val_aug, all_features, categorical_features, category_levels)
-    x_test = prepare_features(test_aug, all_features, categorical_features, category_levels)
+    initial_features = [column for column in all_features if column not in PROXY_FEATURE_NAMES]
+    x_tr = prepare_features(tr_aug, initial_features, categorical_features, category_levels)
+    x_val = prepare_features(val_aug, initial_features, categorical_features, category_levels)
+    x_test = prepare_features(test_aug, initial_features, categorical_features, category_levels)
     fold_ids[val_idx] = fold
 
-    print("  [1/4] LightGBM direct 16-class model")
+    if ENABLE_PROXY_TRAITS:
+        print("  [proxy] Nested 2-Fold multi-target carcass reconstruction")
+        proxy_input_features = [
+            column for column in cat_quality_features if column not in PROXY_FEATURE_NAMES
+        ]
+        proxy_input_features = list(dict.fromkeys(proxy_input_features + ["xgb_sex_code"]))
+        proxy_categorical = [
+            column for column in categorical_features if column in proxy_input_features
+        ]
+        proxy_train_input = prepare_catboost_features(
+            x_tr[proxy_input_features], proxy_categorical
+        )
+        proxy_val_input = prepare_catboost_features(
+            x_val[proxy_input_features], proxy_categorical
+        )
+        proxy_test_input = prepare_catboost_features(
+            x_test[proxy_input_features], proxy_categorical
+        )
+        proxy_train, proxy_val, proxy_test, proxy_metrics = build_nested_proxy_features(
+            proxy_train_input,
+            proxy_val_input,
+            proxy_test_input,
+            train.iloc[tr_idx][TRAIT_COLUMNS],
+            train.iloc[val_idx][TRAIT_COLUMNS],
+            groups.iloc[tr_idx].to_numpy(),
+            proxy_categorical,
+            task_type=CATBOOST_TASK_TYPE,
+            inner_splits=2,
+            random_seed=42 + fold * 10,
+        )
+        for column in PROXY_FEATURE_NAMES:
+            x_tr[column] = proxy_train[column].to_numpy(dtype="float32")
+            x_val[column] = proxy_val[column].to_numpy(dtype="float32")
+            x_test[column] = proxy_test[column].to_numpy(dtype="float32")
+        for metric in proxy_metrics:
+            proxy_metric_rows.append({"fold": fold + 1, **metric})
+            print(
+                f"    {metric['trait']}: MAE={metric['mae']:.4f}, "
+                f"R2={metric['r2']:.4f}"
+            )
+        del proxy_train_input, proxy_val_input, proxy_test_input
+        del proxy_train, proxy_val, proxy_test, proxy_metrics
+        gc.collect()
+
+    print(f"  [1/{component_count}] LightGBM direct 16-class model")
     direct_model = lgb.LGBMClassifier(**lgb_params, num_class=n_classes)
     direct_model.fit(
         x_tr[lgb_features], y_final[tr_idx],
@@ -451,7 +556,7 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     tr_graded = is_graded[tr_idx]
     val_graded = is_graded[val_idx]
 
-    print("  [2/4] CatBoost quality/outlier model")
+    print(f"  [2/{component_count}] CatBoost quality/outlier model")
     x_tr_cat = prepare_catboost_features(x_tr[cat_quality_features], categorical_features)
     x_val_cat = prepare_catboost_features(x_val[cat_quality_features], categorical_features)
     x_test_cat = prepare_catboost_features(x_test[cat_quality_features], categorical_features)
@@ -469,7 +574,7 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     del quality_model, x_tr_cat, x_val_cat, x_test_cat
     gc.collect()
 
-    print("  [3/4] LightGBM ordinal quality boundaries")
+    print(f"  [3/{component_count}] LightGBM ordinal quality boundaries")
     ordinal_val_cumulative = np.zeros((len(val_idx), 4), dtype="float32")
     ordinal_test_cumulative = np.zeros((n_test, 4), dtype="float32")
     for threshold in range(4):
@@ -495,7 +600,7 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     )
     print(f"  Ordinal quality Macro F1: {ordinal_quality_f1:.4f}")
 
-    print("  [4/4] XGBoost ordinal yield hurdle")
+    print(f"  [4/{component_count}] XGBoost ordinal yield hurdle")
     x_tr_xgb = prepare_xgboost_features(x_tr, xgb_yield_features)
     x_val_xgb = prepare_xgboost_features(x_val, xgb_yield_features)
     x_test_xgb = prepare_xgboost_features(x_test, xgb_yield_features)
@@ -504,7 +609,7 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
 
     c_train = (y_yield[tr_idx][tr_graded] == c_index).astype("int8")
     c_val = (y_yield[val_idx][val_graded] == c_index).astype("int8")
-    c_model = build_xgb_classifier(float(c_train.mean()))
+    c_model = build_xgb_classifier(float(c_train.mean()), balance_power=C_BALANCE_POWER)
     c_model.fit(
         x_tr_xgb.loc[tr_graded], c_train,
         eval_set=[(x_val_xgb.loc[val_graded], c_val)], verbose=100,
@@ -513,6 +618,20 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     c_test_probability = c_model.predict_proba(x_test_xgb)[:, 1]
     del c_model
     gc.collect()
+
+    c_alt_val_probability = c_val_probability
+    c_alt_test_probability = c_test_probability
+    if ENABLE_DUAL_C:
+        print("    Training aggressive-C companion (balance power=0.50)")
+        c_alt_model = build_xgb_classifier(float(c_train.mean()), balance_power=0.5)
+        c_alt_model.fit(
+            x_tr_xgb.loc[tr_graded], c_train,
+            eval_set=[(x_val_xgb.loc[val_graded], c_val)], verbose=100,
+        )
+        c_alt_val_probability = c_alt_model.predict_proba(x_val_xgb)[:, 1]
+        c_alt_test_probability = c_alt_model.predict_proba(x_test_xgb)[:, 1]
+        del c_alt_model
+        gc.collect()
 
     tr_ab = tr_graded & (y_yield[tr_idx] != c_index)
     val_ab = val_graded & (y_yield[val_idx] != c_index)
@@ -530,11 +649,38 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
 
     yield_val = combine_yield_hurdle(c_val_probability, a_val_probability)
     yield_test = combine_yield_hurdle(c_test_probability, a_test_probability)
+    yield_alt_val = combine_yield_hurdle(c_alt_val_probability, a_val_probability)
+    yield_alt_test = combine_yield_hurdle(c_alt_test_probability, a_test_probability)
     yield_oof[val_idx] = yield_val
+    yield_alt_oof[val_idx] = yield_alt_val
     yield_test_average += yield_test / N_SPLITS
+    yield_alt_test_average += yield_alt_test / N_SPLITS
     yield_f1 = f1_score(y_yield[val_idx][val_graded], yield_val[val_graded].argmax(1), average="macro")
     c_recall = float(np.mean(yield_val[val_graded][c_val == 1].argmax(1) == c_index))
     print(f"  Yield Macro F1: {yield_f1:.4f}; C recall: {c_recall:.4f}")
+
+    b_specialist_f1 = np.nan
+    b_val_probability = np.zeros(len(val_idx), dtype="float32")
+    if ENABLE_B_SPECIALIST:
+        print(f"  [5/{component_count}] XGBoost B vs non-B specialist")
+        b_index = int(np.flatnonzero(y_encoder.classes_ == "B")[0])
+        b_train = (y_yield[tr_idx][tr_graded] == b_index).astype("int8")
+        b_val = (y_yield[val_idx][val_graded] == b_index).astype("int8")
+        b_model = build_xgb_classifier(float(b_train.mean()), balance_power=0.0)
+        b_model.fit(
+            x_tr_xgb.loc[tr_graded], b_train,
+            eval_set=[(x_val_xgb.loc[val_graded], b_val)], verbose=100,
+        )
+        b_val_probability = b_model.predict_proba(x_val_xgb)[:, 1].astype("float32")
+        b_test_probability = b_model.predict_proba(x_test_xgb)[:, 1].astype("float32")
+        b_specialist_oof[val_idx] = b_val_probability
+        b_specialist_test_average += b_test_probability / N_SPLITS
+        b_specialist_f1 = f1_score(
+            b_val, (b_val_probability[val_graded] >= 0.5).astype("int8"), average="binary"
+        )
+        print(f"  B specialist F1: {b_specialist_f1:.4f}")
+        del b_model
+        gc.collect()
 
     cat_hierarchical_val = combine_hierarchical_probabilities(
         quality_val, yield_val, q_encoder, y_encoder, final_encoder
@@ -554,24 +700,52 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
 
     diagnostic_hierarchical_f1 = -1.0
     diagnostic_ordinal_weight = 0.0
-    for ordinal_weight in np.linspace(0.0, 1.0, 11):
+    diagnostic_b_weight = 0.0
+    diagnostic_c_multiplier = 1.0
+    diagnostic_alt_c_weight = 0.0
+    diagnostic_ordinal_grid = np.linspace(0.0, 1.0, 6) if ENABLE_YIELD_BALANCE else np.linspace(0.0, 1.0, 11)
+    diagnostic_b_grid = [0.0, 0.25, 0.5, 0.75] if ENABLE_B_SPECIALIST else [0.0]
+    diagnostic_c_grid = [0.8, 0.9, 1.0] if ENABLE_YIELD_BALANCE else [1.0]
+    diagnostic_alt_c_grid = np.linspace(0.0, 1.0, 6) if ENABLE_DUAL_C else [0.0]
+    for ordinal_weight in diagnostic_ordinal_grid:
         blended_quality = blend_quality_probabilities(
             quality_val, ordinal_val, ordinal_weight, q_encoder, graded_quality_order
         )
-        candidate_hierarchy = combine_hierarchical_probabilities(
-            blended_quality, yield_val, q_encoder, y_encoder, final_encoder
-        )
-        candidate_score = f1_score(
-            y_final[val_idx], candidate_hierarchy.argmax(1), average="macro"
-        )
-        if candidate_score > diagnostic_hierarchical_f1:
-            diagnostic_hierarchical_f1 = candidate_score
-            diagnostic_ordinal_weight = ordinal_weight
+        for alt_c_weight in diagnostic_alt_c_grid:
+            blended_yield = (
+                (1.0 - alt_c_weight) * yield_val + alt_c_weight * yield_alt_val
+            )
+            for b_weight in diagnostic_b_grid:
+                for c_multiplier in diagnostic_c_grid:
+                    diagnostic_yield_candidate = adjust_yield_probabilities(
+                        blended_yield, b_val_probability, b_weight, c_multiplier
+                    )
+                    candidate_hierarchy = combine_hierarchical_probabilities(
+                        blended_quality, diagnostic_yield_candidate,
+                        q_encoder, y_encoder, final_encoder,
+                    )
+                    candidate_score = f1_score(
+                        y_final[val_idx], candidate_hierarchy.argmax(1), average="macro"
+                    )
+                    if candidate_score > diagnostic_hierarchical_f1:
+                        diagnostic_hierarchical_f1 = candidate_score
+                        diagnostic_ordinal_weight = ordinal_weight
+                        diagnostic_b_weight = b_weight
+                        diagnostic_c_multiplier = c_multiplier
+                        diagnostic_alt_c_weight = alt_c_weight
     diagnostic_quality = blend_quality_probabilities(
         quality_val, ordinal_val, diagnostic_ordinal_weight, q_encoder, graded_quality_order
     )
+    diagnostic_blended_yield = (
+        (1.0 - diagnostic_alt_c_weight) * yield_val
+        + diagnostic_alt_c_weight * yield_alt_val
+    )
+    diagnostic_yield = adjust_yield_probabilities(
+        diagnostic_blended_yield, b_val_probability,
+        diagnostic_b_weight, diagnostic_c_multiplier
+    )
     diagnostic_hierarchy = combine_hierarchical_probabilities(
-        diagnostic_quality, yield_val, q_encoder, y_encoder, final_encoder
+        diagnostic_quality, diagnostic_yield, q_encoder, y_encoder, final_encoder
     )
     # Store the CatBoost-only path temporarily. It is replaced below by an
     # honestly cross-fitted CatBoost/ordinal quality blend.
@@ -595,17 +769,23 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
         "ordinal_quality_f1": ordinal_quality_f1,
         "yield_f1": yield_f1,
         "c_recall": c_recall,
+        "b_specialist_f1": b_specialist_f1,
         "cat_hierarchical_f1": cat_hierarchical_f1,
         "ordinal_hierarchical_f1": ordinal_hierarchical_f1,
         "diagnostic_hierarchical_f1": diagnostic_hierarchical_f1,
         "diagnostic_ordinal_weight": diagnostic_ordinal_weight,
+        "diagnostic_b_weight": diagnostic_b_weight,
+        "diagnostic_c_multiplier": diagnostic_c_multiplier,
+        "diagnostic_alt_c_weight": diagnostic_alt_c_weight,
         "disagreement": disagreement,
         "diagnostic_best_blend_f1": best_fold_blend[0],
         "diagnostic_direct_weight": best_fold_blend[1],
     })
     print(
         f"  Hierarchy: cat={cat_hierarchical_f1:.4f}, ordinal={ordinal_hierarchical_f1:.4f}, "
-        f"diagnostic-best={diagnostic_hierarchical_f1:.4f} (ordinal={diagnostic_ordinal_weight:.1f})"
+        f"diagnostic-best={diagnostic_hierarchical_f1:.4f} "
+        f"(ordinal={diagnostic_ordinal_weight:.1f}, B={diagnostic_b_weight:.2f}, "
+        f"C={diagnostic_c_multiplier:.2f}, altC={diagnostic_alt_c_weight:.2f})"
     )
     print(
         f"  Disagreement={disagreement:.3f}; diagnostic direct/hierarchy blend={best_fold_blend[0]:.4f}"
@@ -619,42 +799,89 @@ for fold, (tr_idx, val_idx) in enumerate(splitter.split(train, y_final, groups=g
     del x_tr_xgb, x_val_xgb, x_test_xgb, direct_val, quality_val, quality_test
     del ordinal_val, ordinal_test, ordinal_val_cumulative, ordinal_test_cumulative
     del yield_val, yield_test, cat_hierarchical_val, ordinal_hierarchical_val
-    del ordinal_quality_val, diagnostic_quality, diagnostic_hierarchy
+    del ordinal_quality_val, diagnostic_quality, diagnostic_blended_yield
+    del diagnostic_yield, diagnostic_hierarchy
     gc.collect()
 
-# Cross-fit the CatBoost/ordinal quality blend before final calibration.
+# Cross-fit quality blending and optional B/C yield balancing before final calibration.
 quality_blend_rows = []
 hierarchical_oof.fill(0)
 hierarchical_test.fill(0)
+balanced_yield_oof = np.zeros_like(yield_oof)
+rng = np.random.default_rng(42)
 for heldout_fold in range(N_SPLITS):
     fit_mask = fold_ids != heldout_fold
     heldout_mask = fold_ids == heldout_fold
+    fit_indices = np.flatnonzero(fit_mask)
+    search_indices = fit_indices
+    if ENABLE_YIELD_BALANCE and len(fit_indices) > 400_000:
+        search_indices = rng.choice(fit_indices, 400_000, replace=False)
+    ordinal_grid = np.linspace(0.0, 1.0, 6) if ENABLE_YIELD_BALANCE else np.linspace(0.0, 1.0, 11)
+    b_weight_grid = [0.0, 0.25, 0.5, 0.75] if ENABLE_B_SPECIALIST else [0.0]
+    c_multiplier_grid = [0.8, 0.9, 1.0] if ENABLE_YIELD_BALANCE else [1.0]
+    alt_c_weight_grid = np.linspace(0.0, 1.0, 6) if ENABLE_DUAL_C else [0.0]
     candidates = []
-    for ordinal_weight in np.linspace(0.0, 1.0, 11):
-        fit_quality = blend_quality_probabilities(
-            quality_oof[fit_mask], ordinal_quality_oof[fit_mask], ordinal_weight,
+    for ordinal_weight in ordinal_grid:
+        search_quality = blend_quality_probabilities(
+            quality_oof[search_indices], ordinal_quality_oof[search_indices], ordinal_weight,
             q_encoder, graded_quality_order,
         )
-        fit_hierarchy = combine_hierarchical_probabilities(
-            fit_quality, yield_oof[fit_mask], q_encoder, y_encoder, final_encoder
-        )
-        candidates.append(
-            (f1_score(y_final[fit_mask], fit_hierarchy.argmax(1), average="macro"), ordinal_weight)
-        )
-    fit_score, best_ordinal_weight = max(candidates, key=lambda row: row[0])
+        for alt_c_weight in alt_c_weight_grid:
+            search_base_yield = (
+                (1.0 - alt_c_weight) * yield_oof[search_indices]
+                + alt_c_weight * yield_alt_oof[search_indices]
+            )
+            for b_weight in b_weight_grid:
+                for c_multiplier in c_multiplier_grid:
+                    search_yield = adjust_yield_probabilities(
+                        search_base_yield, b_specialist_oof[search_indices],
+                        b_weight, c_multiplier,
+                    )
+                    search_hierarchy = combine_hierarchical_probabilities(
+                        search_quality, search_yield, q_encoder, y_encoder, final_encoder
+                    )
+                    candidates.append((
+                        f1_score(
+                            y_final[search_indices], search_hierarchy.argmax(1), average="macro"
+                        ),
+                        ordinal_weight,
+                        b_weight,
+                        c_multiplier,
+                        alt_c_weight,
+                    ))
+    fit_score, best_ordinal_weight, best_b_weight, best_c_multiplier, best_alt_c_weight = max(
+        candidates, key=lambda row: row[0]
+    )
     heldout_quality = blend_quality_probabilities(
         quality_oof[heldout_mask], ordinal_quality_oof[heldout_mask], best_ordinal_weight,
         q_encoder, graded_quality_order,
     )
+    heldout_base_yield = (
+        (1.0 - best_alt_c_weight) * yield_oof[heldout_mask]
+        + best_alt_c_weight * yield_alt_oof[heldout_mask]
+    )
+    heldout_yield = adjust_yield_probabilities(
+        heldout_base_yield, b_specialist_oof[heldout_mask],
+        best_b_weight, best_c_multiplier,
+    )
+    balanced_yield_oof[heldout_mask] = heldout_yield
     hierarchical_oof[heldout_mask] = combine_hierarchical_probabilities(
-        heldout_quality, yield_oof[heldout_mask], q_encoder, y_encoder, final_encoder
+        heldout_quality, heldout_yield, q_encoder, y_encoder, final_encoder
     )
     test_quality = blend_quality_probabilities(
         quality_test_average, ordinal_quality_test, best_ordinal_weight,
         q_encoder, graded_quality_order,
     )
+    test_base_yield = (
+        (1.0 - best_alt_c_weight) * yield_test_average
+        + best_alt_c_weight * yield_alt_test_average
+    )
+    test_yield = adjust_yield_probabilities(
+        test_base_yield, b_specialist_test_average,
+        best_b_weight, best_c_multiplier,
+    )
     hierarchical_test += combine_hierarchical_probabilities(
-        test_quality, yield_test_average, q_encoder, y_encoder, final_encoder
+        test_quality, test_yield, q_encoder, y_encoder, final_encoder
     ) / N_SPLITS
     heldout_score = f1_score(
         y_final[heldout_mask], hierarchical_oof[heldout_mask].argmax(1), average="macro"
@@ -662,6 +889,9 @@ for heldout_fold in range(N_SPLITS):
     quality_blend_rows.append({
         "heldout_fold": heldout_fold + 1,
         "ordinal_weight": best_ordinal_weight,
+        "b_specialist_weight": best_b_weight,
+        "c_multiplier": best_c_multiplier,
+        "alt_c_weight": best_alt_c_weight,
         "fit_f1": fit_score,
         "heldout_f1": heldout_score,
     })
@@ -704,11 +934,17 @@ print(f"[{VERSION}] Raw hierarchical OOF: {raw_hierarchical_f1:.4f}")
 print(f"[{VERSION}] Cross-fitted calibrated OOF: {honest_f1:.4f}")
 
 pd.DataFrame(component_rows).to_csv(f"{OUT_DIR}/component_metrics.csv", index=False)
+if proxy_metric_rows:
+    pd.DataFrame(proxy_metric_rows).to_csv(f"{OUT_DIR}/proxy_metrics.csv", index=False)
 pd.DataFrame(quality_blend_rows).to_csv(f"{OUT_DIR}/quality_blend_folds.csv", index=False)
 pd.DataFrame(calibration_rows).to_csv(f"{OUT_DIR}/calibration_folds.csv", index=False)
 pd.DataFrame(scale_rows).to_csv(f"{OUT_DIR}/class_scales.csv", index=False)
 save_class_metrics(y_final, calibrated_oof, final_encoder.classes_, f"{OUT_DIR}/oof_class_metrics.csv")
-save_class_metrics(y_yield[is_graded], yield_oof[is_graded], y_encoder.classes_, f"{OUT_DIR}/yield_oof_class_metrics.csv")
+yield_metrics_probability = balanced_yield_oof if ENABLE_YIELD_BALANCE else yield_oof
+save_class_metrics(
+    y_yield[is_graded], yield_metrics_probability[is_graded], y_encoder.classes_,
+    f"{OUT_DIR}/yield_oof_class_metrics.csv",
+)
 pd.DataFrame({"feature": lgb_features, "importance": importance}).sort_values("importance", ascending=False).to_csv(
     f"{OUT_DIR}/lgb_feature_importance.csv", index=False
 )
@@ -722,8 +958,23 @@ if SAVE_OOF:
         quality=quality_oof.astype("float16"),
         ordinal_quality=ordinal_quality_oof.astype("float16"),
         yield_probability=yield_oof.astype("float16"),
+        yield_alt_probability=yield_alt_oof.astype("float16"),
+        balanced_yield_probability=balanced_yield_oof.astype("float16"),
+        b_specialist=b_specialist_oof.astype("float16"),
         calibrated=calibrated_oof.astype("float16"),
     )
+
+np.savez_compressed(
+    f"{OUT_DIR}/test_components.npz",
+    direct=direct_test.astype("float16"),
+    quality=quality_test_average.astype("float16"),
+    ordinal_quality=ordinal_quality_test.astype("float16"),
+    yield_probability=yield_test_average.astype("float16"),
+    yield_alt_probability=yield_alt_test_average.astype("float16"),
+    b_specialist=b_specialist_test_average.astype("float16"),
+    hierarchical=hierarchical_test.astype("float16"),
+    calibrated=calibrated_test.astype("float16"),
+)
 
 test_raw["LAST_GRADE"] = final_encoder.inverse_transform(calibrated_test.argmax(1))
 output_path = f"{OUT_DIR}/260418.csv"
