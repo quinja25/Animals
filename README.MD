@@ -86,10 +86,10 @@ jupyter notebook hanwoo_eda.ipynb
 
 ### 6. 파이프라인 실행
 
-현재 최신 실험 파이프라인은 `pipelines/pipeline_v13.py`입니다. 프로젝트 루트에서 실행합니다.
+현재 최신 실험 파이프라인은 `pipelines/pipeline_v14.py`입니다. 프로젝트 루트에서 실행합니다.
 
 ```powershell
-python pipelines/pipeline_v13.py
+python pipelines/pipeline_v14.py
 ```
 
 CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 있습니다.
@@ -97,25 +97,25 @@ CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 
 ```powershell
 $env:CATBOOST_TASK_TYPE="GPU"
 $env:XGBOOST_DEVICE="cuda"
-python pipelines/pipeline_v13.py
+python pipelines/pipeline_v14.py
 ```
 
 전체 학습 전에 첫 번째 LightGBM Fold만 검증하려면 다음 smoke test를 실행합니다.
 
 ```powershell
-$env:V13_SMOKE_STAGE="lgb"
-python pipelines/pipeline_v13.py
+$env:V14_SMOKE_STAGE="lgb"
+python pipelines/pipeline_v14.py
 ```
 
 첫 Fold의 LightGBM, CatBoost, XGBoost 구성요소를 모두 검증하려면 다음을 실행합니다.
 
 ```powershell
-$env:V13_SMOKE_STAGE="components"
-python pipelines/pipeline_v13.py
-$env:V13_SMOKE_STAGE=""
+$env:V14_SMOKE_STAGE="components"
+python pipelines/pipeline_v14.py
+$env:V14_SMOKE_STAGE=""
 ```
 
-실행 완료 시 `submissions/v13/`에 제출 파일과 검증 산출물이 생성됩니다.
+실행 완료 시 `submissions/v14/`에 제출 파일과 검증 산출물이 생성됩니다.
 
 | 파일 | 설명 |
 |------|------|
@@ -143,8 +143,9 @@ $env:V13_SMOKE_STAGE=""
 | v9 | 직접 LightGBM + 계층형 CatBoost + 클래스 보정 | StratifiedGroupKFold | **LB 0.239**, 보정 OOF 0.2430 |
 | v10 | Fold-safe KPN·관측소 사전확률 + 교차 적합 보정 | StratifiedGroupKFold | Fold 1 계층 F1 0.1722로 중단 |
 | v11 | LightGBM 직접 + CatBoost/Ordinal 육질 + XGBoost 순서형 육량 | StratifiedGroupKFold + Cross-fit | **교차 적합 OOF 0.2449**, LB 제출 예정 |
-| v12 | 확장 혈통 + 완화된 C 가중치 + B specialist 검증 | StratifiedGroupKFold + Cross-fit | **교차 적합 OOF 0.2460**, LB 제출 예정 |
-| v13 | Nested 도체형질 복원 + Dual-C 앙상블 | Nested Farm CV + Cross-fit | 구성요소 검증 예정 |
+| v12 | 확장 혈통 + 완화된 C 가중치 + B specialist 검증 | StratifiedGroupKFold + Cross-fit | **교차 적합 OOF 0.2460**, LB 0.241 수준 |
+| v13 | Nested 도체형질 복원 + Dual-C 앙상블 | Nested Farm CV + Cross-fit | **원본 계층 OOF 0.2381**, **교차 적합 OOF 0.2477**, **LB 0.244** |
+| v14 | 직접 경계 복원 + B/C 전문 모델 + 드리프트 저항 분기 + 지역 보정 | Nested Farm CV + Nested calibration | 구현 완료, 전체 검증 예정 |
 
 v9의 성능 향상은 단순한 모델 용량 증가보다 다음 세 요소에서 발생했습니다.
 
