@@ -23,6 +23,18 @@ PROXY_FEATURE_NAMES = [
     "proxy_quality_worst_rank",
     "proxy_growth_high",
 ]
+BOUNDARY_TARGET_NAMES = [
+    "boundary_windex",
+    "boundary_yield_margin_a",
+    "boundary_yield_margin_c",
+    "boundary_insfat_rank",
+    "boundary_yuksak_rank",
+    "boundary_fatsak_rank",
+    "boundary_tissue_rank",
+    "boundary_quality_worst_rank",
+    "boundary_growth_high",
+]
+BOUNDARY_PROXY_FEATURE_NAMES = [f"proxy_{name}" for name in BOUNDARY_TARGET_NAMES]
 
 
 def _quality_ranks(predictions):
@@ -95,6 +107,155 @@ def derive_proxy_features(predictions, base_frame):
     result["proxy_quality_worst_rank"] = np.maximum.reduce(quality_ranks).astype("float32")
     result["proxy_growth_high"] = (predictions[:, 6] >= 8.0).astype("float32")
     return result
+
+
+def _yield_thresholds(base_frame):
+    sex = pd.to_numeric(base_frame["xgb_sex_code"], errors="coerce").fillna(2).to_numpy(dtype="int8")
+    a_threshold = np.select([sex == 0, sex == 1], [61.83, 68.45], default=62.52)
+    c_threshold = np.select([sex == 0, sex == 1], [59.70, 66.32], default=60.40)
+    return a_threshold.astype("float32"), c_threshold.astype("float32")
+
+
+def make_boundary_targets(target_frame, base_frame):
+    """Build official-rule endpoints directly from observed training traits."""
+    traits = target_frame[TRAIT_COLUMNS].apply(pd.to_numeric, errors="coerce").to_numpy(dtype="float32")
+    windex = pd.to_numeric(target_frame["WINDEX"], errors="coerce").to_numpy(dtype="float32")
+    a_threshold, c_threshold = _yield_thresholds(base_frame)
+    ranks = _quality_ranks(traits)
+    worst_rank = np.maximum.reduce(ranks).astype("float32")
+    growth_high = (traits[:, 6] >= 8.0).astype("float32")
+    return pd.DataFrame(
+        np.column_stack([
+            windex,
+            windex - a_threshold,
+            windex - c_threshold,
+            *ranks,
+            worst_rank,
+            growth_high,
+        ]),
+        columns=BOUNDARY_TARGET_NAMES,
+        index=target_frame.index,
+        dtype="float32",
+    )
+
+
+def derive_boundary_proxy_features(predictions, index):
+    predictions = np.asarray(predictions, dtype="float32").copy()
+    predictions[:, 0] = np.clip(predictions[:, 0], 35.0, 85.0)
+    predictions[:, 1:3] = np.clip(predictions[:, 1:3], -30.0, 30.0)
+    predictions[:, 3:8] = np.clip(predictions[:, 3:8], 0.0, 4.0)
+    predictions[:, 8] = np.clip(predictions[:, 8], 0.0, 1.0)
+    return pd.DataFrame(
+        predictions,
+        columns=BOUNDARY_PROXY_FEATURE_NAMES,
+        index=index,
+        dtype="float32",
+    )
+
+
+def build_nested_boundary_features(
+    x_train,
+    x_validation,
+    x_test,
+    target_train,
+    target_validation,
+    farm_groups,
+    categorical_features,
+    task_type="GPU",
+    inner_splits=2,
+    random_seed=142,
+    iterations=700,
+):
+    """Directly reconstruct official decision endpoints with inner farm OOF."""
+    train_targets = make_boundary_targets(target_train, x_train)
+    validation_targets = make_boundary_targets(target_validation, x_validation)
+    train_required = target_train[TRAIT_COLUMNS + ["WINDEX"]].apply(pd.to_numeric, errors="coerce")
+    validation_required = target_validation[TRAIT_COLUMNS + ["WINDEX"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    valid_train = np.isfinite(train_required).all(axis=1) & (train_required > -90).all(axis=1)
+    valid_validation = (
+        np.isfinite(validation_required).all(axis=1) & (validation_required > -90).all(axis=1)
+    )
+    if valid_train.sum() < 10_000:
+        raise ValueError(f"Too few valid rows for boundary proxy training: {valid_train.sum():,}")
+
+    train_predictions = np.zeros((len(x_train), len(BOUNDARY_TARGET_NAMES)), dtype="float32")
+    validation_predictions = np.zeros((len(x_validation), len(BOUNDARY_TARGET_NAMES)), dtype="float32")
+    test_predictions = np.zeros((len(x_test), len(BOUNDARY_TARGET_NAMES)), dtype="float32")
+    validation_assignment = np.arange(len(x_validation)) % inner_splits
+    test_assignment = np.arange(len(x_test)) % inner_splits
+    missing_positions = np.flatnonzero(~valid_train.to_numpy())
+    missing_assignment = np.arange(len(missing_positions)) % inner_splits
+    split_rows = np.flatnonzero(valid_train.to_numpy())
+    split_groups = np.asarray(farm_groups)[split_rows]
+    splitter = GroupKFold(n_splits=inner_splits)
+
+    for inner_fold, (fit_local, hold_local) in enumerate(
+        splitter.split(split_rows, groups=split_groups), start=1
+    ):
+        fit_rows = split_rows[fit_local]
+        hold_rows = split_rows[hold_local]
+        fit_target = train_targets.iloc[fit_rows].to_numpy(dtype="float32")
+        means = fit_target.mean(axis=0)
+        scales = np.maximum(fit_target.std(axis=0), 1e-3)
+        standardized_fit = (fit_target - means) / scales
+        standardized_hold = (
+            train_targets.iloc[hold_rows].to_numpy(dtype="float32") - means
+        ) / scales
+        model = CatBoostRegressor(
+            loss_function="MultiRMSE",
+            eval_metric="MultiRMSE",
+            iterations=iterations,
+            learning_rate=0.05,
+            depth=8,
+            l2_leaf_reg=10.0,
+            random_strength=0.5,
+            random_seed=random_seed + inner_fold,
+            task_type=task_type,
+            allow_writing_files=False,
+            verbose=100,
+        )
+        model.fit(
+            x_train.iloc[fit_rows],
+            standardized_fit,
+            cat_features=categorical_features,
+            eval_set=(x_train.iloc[hold_rows], standardized_hold),
+            early_stopping_rounds=100,
+            use_best_model=True,
+        )
+        train_predictions[hold_rows] = model.predict(x_train.iloc[hold_rows]) * scales + means
+        validation_rows = np.flatnonzero(validation_assignment == inner_fold - 1)
+        test_rows = np.flatnonzero(test_assignment == inner_fold - 1)
+        validation_predictions[validation_rows] = model.predict(
+            x_validation.iloc[validation_rows]
+        ) * scales + means
+        test_predictions[test_rows] = model.predict(x_test.iloc[test_rows]) * scales + means
+        assigned_missing = missing_positions[missing_assignment == inner_fold - 1]
+        if len(assigned_missing):
+            train_predictions[assigned_missing] = model.predict(
+                x_train.iloc[assigned_missing]
+            ) * scales + means
+        del model
+        gc.collect()
+
+    metrics = []
+    actual = validation_targets.loc[valid_validation].to_numpy(dtype="float32")
+    predicted = validation_predictions[valid_validation.to_numpy()]
+    for index, target in enumerate(BOUNDARY_TARGET_NAMES):
+        metrics.append({
+            "trait": target,
+            "mae": mean_absolute_error(actual[:, index], predicted[:, index]),
+            "r2": r2_score(actual[:, index], predicted[:, index]),
+            "support": int(valid_validation.sum()),
+            "proxy_type": "boundary",
+        })
+    return (
+        derive_boundary_proxy_features(train_predictions, x_train.index),
+        derive_boundary_proxy_features(validation_predictions, x_validation.index),
+        derive_boundary_proxy_features(test_predictions, x_test.index),
+        metrics,
+    )
 
 
 def build_nested_proxy_features(
