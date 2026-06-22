@@ -86,10 +86,10 @@ jupyter notebook hanwoo_eda.ipynb
 
 ### 6. 파이프라인 실행
 
-현재 최신 실험 파이프라인은 `pipelines/pipeline_v11.py`입니다. 프로젝트 루트에서 실행합니다.
+현재 최신 실험 파이프라인은 `pipelines/pipeline_v13.py`입니다. 프로젝트 루트에서 실행합니다.
 
 ```powershell
-python pipelines/pipeline_v11.py
+python pipelines/pipeline_v13.py
 ```
 
 CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 있습니다.
@@ -97,35 +97,37 @@ CatBoost GPU 학습이 가능한 환경에서는 다음과 같이 실행할 수 
 ```powershell
 $env:CATBOOST_TASK_TYPE="GPU"
 $env:XGBOOST_DEVICE="cuda"
-python pipelines/pipeline_v11.py
+python pipelines/pipeline_v13.py
 ```
 
 전체 학습 전에 첫 번째 LightGBM Fold만 검증하려면 다음 smoke test를 실행합니다.
 
 ```powershell
-$env:V11_SMOKE_STAGE="lgb"
-python pipelines/pipeline_v11.py
+$env:V13_SMOKE_STAGE="lgb"
+python pipelines/pipeline_v13.py
 ```
 
 첫 Fold의 LightGBM, CatBoost, XGBoost 구성요소를 모두 검증하려면 다음을 실행합니다.
 
 ```powershell
-$env:V11_SMOKE_STAGE="components"
-python pipelines/pipeline_v11.py
-$env:V11_SMOKE_STAGE=""
+$env:V13_SMOKE_STAGE="components"
+python pipelines/pipeline_v13.py
+$env:V13_SMOKE_STAGE=""
 ```
 
-실행 완료 시 `submissions/v11/`에 제출 파일과 검증 산출물이 생성됩니다.
+실행 완료 시 `submissions/v13/`에 제출 파일과 검증 산출물이 생성됩니다.
 
 | 파일 | 설명 |
 |------|------|
 | `260418.csv` | 최종 제출 파일 |
-| `fold_metrics.csv` | Fold별 직접·계층 모델 Macro F1 |
+| `component_metrics.csv` | Fold별 직접·육질·육량·계층 모델 Macro F1 |
+| `quality_blend_folds.csv` | Ordinal·B specialist·C multiplier 선택 결과 |
 | `calibration_folds.csv` | 교차 적합 보정 성능과 블렌드 설정 |
 | `class_scales.csv` | Fold별 클래스 확률 보정 계수 |
 | `oof_class_metrics.csv` | 클래스별 OOF 정밀도·재현율·F1 |
 | `oof_predictions.npz` | 직접·계층·보정 OOF 확률과 Fold 번호 |
-| `feature_importance.csv` | LightGBM 피처 중요도 |
+| `test_components.npz` | 테스트 구성요소별 원본 확률 캐시 |
+| `lgb_feature_importance.csv` | LightGBM 피처 중요도 |
 
 > v10은 240만 건 전체 데이터에 대해 5-Fold로 LightGBM 1개와 CatBoost 2개를 학습하므로 실행 시간이 길고 메모리 사용량이 큽니다. NVIDIA GPU가 있는 환경에서는 반드시 `CATBOOST_TASK_TYPE=GPU` 사용을 권장합니다.
 
@@ -139,8 +141,10 @@ $env:V11_SMOKE_STAGE=""
 | v7 | CatBoost 단일 모델, 데이터 정합성 개선 | StratifiedGroupKFold | 별도 기록 없음 |
 | v8 | LightGBM + CatBoost 직접 16클래스 앙상블 | StratifiedGroupKFold | OOF 0.2126 |
 | v9 | 직접 LightGBM + 계층형 CatBoost + 클래스 보정 | StratifiedGroupKFold | **LB 0.239**, 보정 OOF 0.2430 |
-| v10 | Fold-safe KPN·관측소 사전확률 + 교차 적합 보정 | StratifiedGroupKFold | 학습 및 평가 예정 |
-| v11 | LightGBM 직접 + CatBoost 육질 + XGBoost 순서형 육량 | StratifiedGroupKFold + Cross-fit | 구성요소 검증 예정 |
+| v10 | Fold-safe KPN·관측소 사전확률 + 교차 적합 보정 | StratifiedGroupKFold | Fold 1 계층 F1 0.1722로 중단 |
+| v11 | LightGBM 직접 + CatBoost/Ordinal 육질 + XGBoost 순서형 육량 | StratifiedGroupKFold + Cross-fit | **교차 적합 OOF 0.2449**, LB 제출 예정 |
+| v12 | 확장 혈통 + 완화된 C 가중치 + B specialist 검증 | StratifiedGroupKFold + Cross-fit | **교차 적합 OOF 0.2460**, LB 제출 예정 |
+| v13 | Nested 도체형질 복원 + Dual-C 앙상블 | Nested Farm CV + Cross-fit | 구성요소 검증 예정 |
 
 v9의 성능 향상은 단순한 모델 용량 증가보다 다음 세 요소에서 발생했습니다.
 
