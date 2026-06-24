@@ -44,9 +44,24 @@ from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
 
-# Requirements:
-#   Python 3.11
-#   numpy, pandas, scikit-learn, lightgbm, catboost, xgboost
+# 권장 Windows 실행 환경:
+#   conda create -n hanwoo python=3.11 -y
+#   conda activate hanwoo
+#   python -m pip install --upgrade pip
+#   python -m pip install numpy pandas scikit-learn lightgbm catboost xgboost openpyxl
+#
+# PowerShell 전체 GPU 실행:
+#   cd C:\Users\jaeyo\Projects\Animals
+#   conda activate hanwoo
+#   $env:CATBOOST_TASK_TYPE = "GPU"
+#   $env:XGBOOST_DEVICE = "cuda"
+#   $env:V13_SMOKE_STAGE = ""
+#   $env:SAVE_OOF = "1"
+#   python .\pipeline_v13_model.py
+#
+# GPU/CUDA 문제가 있을 때 CPU 실행:
+#   $env:CATBOOST_TASK_TYPE = "CPU"
+#   $env:XGBOOST_DEVICE = "cpu"
 # 권장 실행:
 #   CatBoost/XGBoost GPU 가능 환경: CATBOOST_TASK_TYPE=GPU, XGBOOST_DEVICE=cuda
 #   Mac/CPU 환경: CATBOOST_TASK_TYPE=CPU, XGBOOST_DEVICE=cpu
