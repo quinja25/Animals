@@ -1,0 +1,16 @@
+# Core data stack
+numpy>=1.26,<2.0
+pandas>=2.0
+scikit-learn>=1.4
+
+# Model libraries used by pipeline_v13_model.py
+lightgbm>=4.0
+catboost>=1.2
+xgboost>=2.0
+
+# EDA notebook
+matplotlib>=3.8
+seaborn>=0.13
+jupyterlab>=4.0
+notebook>=7.0
+ipykernel>=6.0

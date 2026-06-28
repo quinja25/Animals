@@ -369,3 +369,110 @@ hanwoo_train (메인)
 ## 프로젝트 파이프라인
 
 단계별 진행 방법, 피처 엔지니어링 전략, 모델 구축 계획은 [PIPELINE.MD](PIPELINE.MD)를 참고하세요.
+
+---
+
+## Repository Structure
+
+This public repository keeps the final runnable model at the project root:
+
+- `pipeline_v13_model.py`: final model pipeline.
+- `PIPELINE.MD`: pipeline history, modeling decisions, validation notes, and archived experiment summary.
+- `archive/`: older pipelines, temporary scripts, scratch analysis, and superseded helper files.
+- `eda_additions/`: generated EDA figures used to support feature and validation decisions.
+- `kpn_eda/`: generated KPN genetic-value EDA figures.
+
+Generated data, trained model artifacts, virtual environments, submissions, and local tool caches are excluded through `.gitignore`.
+
+## Submission Standards
+
+All submission-producing pipelines should follow these rules:
+
+- Filename: `260418.csv`.
+- Encoding: UTF-8 with BOM (`utf-8-sig`).
+- Required column: `LAST_GRADE`.
+- Allowed labels: `1++A`, `1++B`, `1++C`, `1+A`, `1+B`, `1+C`, `1A`, `1B`, `1C`, `2A`, `2B`, `2C`, `3A`, `3B`, `3C`, `등외`.
+- Recommended output location: `submissions/{version}/260418.csv`.
+
+Target label encoding used during modeling:
+
+| Code | Grade |
+|---:|:---|
+| 0 | `1++A` |
+| 1 | `1++B` |
+| 2 | `1++C` |
+| 3 | `1+A` |
+| 4 | `1+B` |
+| 5 | `1+C` |
+| 6 | `1A` |
+| 7 | `1B` |
+| 8 | `1C` |
+| 9 | `2A` |
+| 10 | `2B` |
+| 11 | `2C` |
+| 12 | `3A` |
+| 13 | `3B` |
+| 14 | `3C` |
+| 15 | `등외` |
+
+## Data Join Standards
+
+Use normalized string keys before joining:
+
+- `CATTLE_NO`
+- `KPN_NO`
+- `FARM_UNIQUE_NO`
+
+Recommended normalization:
+
+```python
+df[key] = df[key].astype(str).str.strip()
+```
+
+Primary joins:
+
+| Source | Key | Target | Notes |
+|:---|:---|:---|:---|
+| `hanwoo_train/test` | `CATTLE_NO` | `hanwoo_lineage` | Deduplicate lineage by `CATTLE_NO` before joining. |
+| `hanwoo_lineage` | `KPN_NO` | KPN genetic data | Use breeding-value fields where coverage is valid. |
+| `hanwoo_train/test` | `FARM_UNIQUE_NO` | `hanwoo_area` | Use farm area and yearly farm context. |
+| `hanwoo_area` | `FARM_UNIQUE_NO` | `hanwoo_death` | Aggregate death counts before joining. |
+| `hanwoo_train/test` | `stn`, year, month | `hanwoo_weather` | Aggregate weather to monthly summaries before joining. |
+
+Because train and test farms have no farm overlap, do not use direct `FARM_UNIQUE_NO` target encoding for final generalization. Use fold-safe historical statistics through broader keys such as `KPN_NO`, station (`stn`), region, or other non-leaking context.
+
+## EDA Artifacts
+
+Additional EDA figures:
+
+- `eda_additions/01_sex_quality_distribution.png`: sex or judge-sex quality-grade distribution.
+- `eda_additions/02_train_test_distribution_drift.png`: train/test drift by year and key fields.
+- `eda_additions/03_missingness_by_quality.png`: missingness patterns by quality grade.
+- `eda_additions/04_external_join_coverage.png`: coverage of weather, area, death, and lineage joins.
+- `eda_additions/05_farm_context_high_quality.png`: farm size, density, and high-grade relationship.
+- `eda_additions/06_grade_distribution_from_final_writeup.png`: final, quality, and yield grade imbalance from the final proposal.
+- `eda_additions/07_carcass_trait_grade_correlation_heatmap.png`: carcass-trait correlation heatmap against quality and yield grades.
+- `eda_additions/08_sex_quality_composition_from_final_writeup.jpg`: sex-wise quality-grade composition from the final proposal.
+
+KPN EDA figures:
+
+- `kpn_eda/01_core_breeding_value_distribution.png`: core breeding-value distributions.
+- `kpn_eda/02_core_breeding_value_correlation.png`: correlation among genetic breeding values.
+- `kpn_eda/03_core_accuracy_distribution.png`: distribution of breeding-value accuracy.
+- `kpn_eda/04_inbreeding_and_pedigree_missingness.png`: inbreeding and pedigree missingness.
+- `kpn_eda/05_genetic_profile_and_composite_index.png`: genetic profile and composite index example.
+- `kpn_eda/06_kpn_match_coverage.png`: KPN matching coverage against lineage and train data.
+
+## Final Proposal Summary
+
+The final proposal frames the task as a weather and livestock data fusion problem for predicting carcass grade before shipment. Weather matters because high-temperature, high-humidity exposure raises heat stress, reduces intake and weight gain, and can suppress intramuscular fat deposition.
+
+Key EDA findings reflected in the final writeup:
+
+- Final grade labels are imbalanced, especially `3C` and `등외`.
+- Yield grade `C` is underrepresented relative to `A` and `B`, which motivates dedicated C-grade handling.
+- Backfat thickness and yield index are the strongest yield-grade indicators.
+- Intramuscular fat is the strongest quality-grade indicator, while tissue texture is negatively related to quality grade.
+- Sex is structurally important: steer and female cattle have much higher high-quality-grade share than male cattle.
+
+The final modeling objective is to predict 16 final carcass-grade classes using weather exposure, farm context, lineage/genetic information, and animal-level physical features while preserving unseen-farm validation realism.

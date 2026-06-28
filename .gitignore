@@ -1,16 +1,45 @@
-#Data
+# Data and private reference documents
 data/
-소도체 등급판정기준 설명자료.pdf
+*.hwp
+*.hwpx
+*.pdf
 
-#Claude/OMC
+# Local environments and caches
+.venv/
+.mplconfig/
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+
+# Tooling state
 .omc/
 .claude/
+.agents/
 
-#Models
+# Generated model artifacts
 models/
+catboost_info/
+*.cbm
+*.pkl
+*.pickle
+*.joblib
+*.model
 
-#MD Files
-CLAUDE.md
-
-#Submission files
+# Submission and run outputs
 submissions/
+*.log
+*.tmp
+
+# Previous models and exploratory scripts
+archive/
+
+# Proposal/local report extraction artifacts
+proposal*.txt
+proposal*_images/
+proposal*_unzip/
+proposal_final_images/
+
+# Images
+kpn_eda/
+eda_additions/
