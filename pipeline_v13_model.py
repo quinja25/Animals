@@ -19,7 +19,7 @@
 추가 혈통 및 KPN 데이터는 단순한 과거 등급 암기가 아니라 유전적 경향을 반영하는
 보조 신호로 활용하였다. 또한 테스트 데이터에 없는 도체형질은 실제 값을 직접
 사용하지 않고, 농장 단위 누수를 방지하는 nested proxy 모델로 복원한 예측값만
-사용하여 학습 조건과 제출 조건을 일치시켰다. 최종 보정과 앙상블 가중치 선택은
+사용하여 학습 조건과 추론 조건을 일치시켰다. 최종 보정과 앙상블 가중치 선택은
 교차 적합 방식으로 수행해 검증 Fold를 직접 보고 조정하는 낙관적 평가를 줄였다.
 """
 
@@ -850,7 +850,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BASE_DIR = str(SCRIPT_DIR if (SCRIPT_DIR / "data").exists() else SCRIPT_DIR.parent)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 VERSION = "v13"
-OUT_DIR = os.path.join(BASE_DIR, "submissions", VERSION)
+OUT_DIR = os.path.join(BASE_DIR, "outputs", VERSION)
 Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
 
 N_SPLITS = 5

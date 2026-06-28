@@ -321,12 +321,12 @@ Final prediction:
 Default output directory:
 
 ```text
-submissions/v13/
+outputs/v13/
 ```
 
 | File | Description |
 |:---|:---|
-| `260418.csv` | final submission file |
+| `260418.csv` | prediction output |
 | `component_metrics.csv` | fold-level direct/quality/yield/hierarchy metrics |
 | `proxy_metrics.csv` | carcass-trait proxy reconstruction metrics |
 | `quality_blend_folds.csv` | CatBoost/Ordinal quality blending results |

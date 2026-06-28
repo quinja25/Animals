@@ -26,8 +26,9 @@ catboost_info/
 *.joblib
 *.model
 
-# Submission and run outputs
-submissions/
+# Generated run outputs
+outputs/
+s?bmissions/
 *.log
 *.tmp
 
