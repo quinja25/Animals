@@ -4,6 +4,14 @@ data/
 *.hwpx
 *.pdf
 
+# Local credentials and environment overrides
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+token.json
+
 # Local environments and caches
 .venv/
 .mplconfig/
@@ -17,6 +25,9 @@ __pycache__/
 .claude/
 .agents/
 
+# Local repository backups created before history rewrites.
+backups/
+
 # Generated model artifacts
 models/
 catboost_info/
@@ -28,9 +39,10 @@ catboost_info/
 
 # Generated run outputs
 outputs/
-s?bmissions/
+submissions/
 *.log
 *.tmp
+tmp_empty_data/
 
 # Previous models and exploratory scripts
 archive/
@@ -41,6 +53,14 @@ proposal*_images/
 proposal*_unzip/
 proposal_final_images/
 
-# Images
-kpn_eda/
-eda_additions/
+# Local public-release working notes and source art
+livestock-repo-HANDOFF.md
+portfolio_assets/
+
+# Generated EDA figures: regenerate from hanwoo_eda.ipynb when needed.
+# kpn_eda/ and eda_additions/ are tracked on purpose because README.md uses them.
+
+# Documentation assets are always tracked.
+!docs/
+!docs/images/
+!docs/images/*.png

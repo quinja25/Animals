@@ -1,5 +1,9 @@
 # Hanwoo Grade Prediction with Weather and Livestock Data
 
+Public portfolio release for a 5th-place machine-learning competition project:
+farm-aware validation, weather exposure, lineage genetics, and fold-safe proxy
+carcass traits for Hanwoo grade prediction.
+
 This repository contains the final v13 pipeline for predicting Hanwoo (`한우`, Korean native cattle) carcass grade (`도체등급`) from livestock, weather, farm, lineage, and KPN genetic data.
 
 The final runnable model is:
@@ -21,13 +25,35 @@ The prediction target is `LAST_GRADE`, a 16-class final grade (`최종등급`) l
 
 `등외` is translated in this project as `out-of-grade`.
 
+<p align="center">
+  <img src="docs/images/01_model_overview.png"
+       alt="Overview of the Hanwoo grade prediction pipeline, including 16 target classes, direct and hierarchical model paths, farm-aware validation, proxy carcass traits, weather exposure, lineage, and KPN genetic features"
+       width="860">
+</p>
+
+The final model combines farm-safe validation, weather exposure, lineage
+genetics, and proxy carcass traits to predict Hanwoo carcass grades.
+
+## Competition
+
+Built for the [KMA Weather Big Data Contest](https://bd.kma.go.kr/contest/main.do)
+livestock topic (`날씨 빅데이터 대회 축산 주제 입선`), predicting Hanwoo carcass
+grade from weather exposure combined with livestock, farm, lineage, and KPN
+genetic data.
+
+| | |
+|:---|:---|
+| Result | 5th place / 입선 |
+| Task | Weather-data-based Hanwoo carcass grade prediction |
+| Period | 2026.05-2026.07 |
+
 ## Repository Structure
 
 | Path | Description |
 |:---|:---|
 | `pipeline_v13_model.py` | final v13 model pipeline |
 | `hanwoo_eda.ipynb` | reproducible EDA notebook |
-| `PIPELINE.MD` | detailed technical explanation of the v13 architecture and development history |
+| `PIPELINE.md` | detailed technical explanation of the v13 architecture and development history |
 | `requirements.txt` | Python dependencies for the final model and EDA notebook |
 
 Large data files, generated model artifacts, run outputs, and archived experiments are intentionally excluded through `.gitignore`.
@@ -62,6 +88,78 @@ The EDA explains why the final v13 pipeline is structured as a farm-aware, proxy
 
 The EDA notebook, `hanwoo_eda.ipynb`, contains the reproducible analysis behind these conclusions, including grade imbalance, carcass-trait relationships, sex effects, train/test drift, missingness, weather exposure, farm context, lineage coverage, and KPN signal checks.
 
+<p align="center">
+  <img src="eda_additions/02_train_test_distribution_drift.png"
+       alt="Train and test distribution drift showing that train and test farms do not overlap"
+       width="760">
+</p>
+
+Farm-grouped validation is necessary because a random row split would let
+farm-level context leak across folds.
+
+<p align="center">
+  <img src="eda_additions/03_missingness_by_quality.png"
+       alt="Missingness by quality grade showing measured carcass traits unavailable in the test set"
+       width="760">
+</p>
+
+The missing measured carcass traits are the motivation for Nested Proxy
+Reconstruction in the final v13 model.
+
+<p align="center">
+  <img src="eda_additions/01_sex_quality_distribution.png"
+       alt="Sex and judge-sex composition shifts across Hanwoo quality grades"
+       width="760">
+</p>
+
+Sex-related categorical features remain in the model because the grade
+distribution changes materially by sex and judge-sex composition.
+
+<p align="center">
+  <img src="eda_additions/05_farm_context_high_quality.png"
+       alt="Farm context summary showing signal associated with high-quality Hanwoo grades"
+       width="760">
+</p>
+
+Farm context provides supporting signal, but it does not replace the missing
+carcass-trait measurements on its own.
+
+<p align="center">
+  <img src="eda_additions/04_external_join_coverage.png"
+       alt="External join coverage for livestock, weather, lineage, area, death-history, and KPN genetic data"
+       width="760">
+</p>
+
+<p align="center">
+  <img src="eda_additions/06_grade_distribution_summary.png"
+       alt="Summary of the 16-class final-grade distribution and class imbalance"
+       width="760">
+</p>
+
+<p align="center">
+  <img src="eda_additions/07_carcass_trait_grade_correlation_heatmap.png"
+       alt="Correlation heatmap between measured carcass traits and Hanwoo grade structure"
+       width="760">
+</p>
+
+<p align="center">
+  <img src="eda_additions/08_sex_quality_composition_summary.jpg"
+       alt="Summary of sex composition by Hanwoo quality grade"
+       width="760">
+</p>
+
+<details>
+<summary>KPN genetic-data checks (6 charts)</summary>
+
+<img src="kpn_eda/01_core_breeding_value_distribution.png" alt="Distribution of core KPN breeding-value features" width="700">
+<img src="kpn_eda/02_core_breeding_value_correlation.png" alt="Correlation heatmap for core KPN breeding-value features" width="700">
+<img src="kpn_eda/03_core_accuracy_distribution.png" alt="Distribution of KPN breeding-value accuracy fields" width="700">
+<img src="kpn_eda/04_inbreeding_and_pedigree_missingness.png" alt="KPN inbreeding and pedigree missingness summary" width="700">
+<img src="kpn_eda/05_genetic_profile_and_composite_index.png" alt="KPN genetic profile and composite index analysis" width="700">
+<img src="kpn_eda/06_kpn_match_coverage.png" alt="KPN match coverage between lineage identifiers and genetic data" width="700">
+
+</details>
+
 ## Final v13 Model
 
 The final model combines a direct final-grade model with a hierarchical quality/yield model.
@@ -88,13 +186,28 @@ Performance summary:
 | Hierarchical path | 0.2384 | - |
 | Final ensemble | 0.2475-0.2477 | 0.244 |
 
-For the full model discussion, including development history and component tradeoffs, see [PIPELINE.MD](PIPELINE.MD).
+For the full model discussion, including development history and component tradeoffs, see [PIPELINE.md](PIPELINE.md).
 
-## Data Files
+## Data
 
-The pipeline expects a local `data/` directory. These files are not committed because several are large and may be private or competition-provided.
+The raw competition datasets are not included in this repository. They must be
+obtained through the official competition or data-provider channels.
 
-Expected files:
+The model was trained with locally available competition data and joined
+external/public data sources, including:
+
+- livestock records
+- weather exposure data
+- farm and location context
+- lineage information
+- KPN genetic information
+- slaughter and carcass measurements available in the training data
+
+The prediction target is `LAST_GRADE`, the final Hanwoo carcass grade. The
+pipeline expects the required CSV/Excel files under a local `data/` directory,
+which is intentionally ignored by Git.
+
+Expected local files:
 
 | File | Purpose |
 |:---|:---|
@@ -147,6 +260,7 @@ The dependency list is intentionally aligned with [requirements.txt](requirement
 ```text
 numpy>=1.26,<2.0
 pandas>=2.0
+python-dateutil>=2.8
 scikit-learn>=1.4
 lightgbm>=4.0
 catboost>=1.2
@@ -178,17 +292,20 @@ Main outputs include prediction results, component metrics, proxy reconstruction
 
 ## Runtime Options
 
-Use CPU instead of GPU:
+The competition model was developed and tuned with GPU acceleration. This
+public release now defaults to CPU for portability and reproducibility on a
+fresh clone. Use GPU acceleration when your local CatBoost/XGBoost environment
+supports it:
 
 ```bash
-CATBOOST_TASK_TYPE=CPU XGBOOST_DEVICE=cpu python pipeline_v13_model.py
+CATBOOST_TASK_TYPE=GPU XGBOOST_DEVICE=cuda python pipeline_v13_model.py
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CATBOOST_TASK_TYPE="CPU"
-$env:XGBOOST_DEVICE="cpu"
+$env:CATBOOST_TASK_TYPE="GPU"
+$env:XGBOOST_DEVICE="cuda"
 python pipeline_v13_model.py
 ```
 
@@ -222,3 +339,13 @@ jupyter lab
 
 - Large data files are intentionally ignored. Use Git LFS or external storage if you need to publish data.
 - Archived experiments and old scripts are excluded from the public repo surface; the final implementation is self-contained in `pipeline_v13_model.py`.
+- Before recreating or publishing the GitHub repository, follow the private clean-history checklist in [docs/CLEAN_HISTORY_RELEASE.md](docs/CLEAN_HISTORY_RELEASE.md).
+
+## License
+
+Code in this repository is released under the MIT License.
+
+The underlying livestock, weather, and KPN datasets are not included and are
+not covered by this license. They were provided under the competition and data
+provider terms and remain the property of their respective providers. Obtain
+them through official channels; do not redistribute.

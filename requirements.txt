@@ -1,6 +1,7 @@
 # Core data stack
 numpy>=1.26,<2.0
 pandas>=2.0
+python-dateutil>=2.8
 scikit-learn>=1.4
 
 # Model libraries used by pipeline_v13_model.py
